@@ -19,7 +19,10 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROBOTS_DIR = path.resolve(__dirname, "../robots");
-const PORT = parseInt(process.argv[2] ?? "9877", 10);
+const parsedPort = Number.parseInt(process.argv[2] ?? "", 10);
+const PORT = Number.isInteger(parsedPort) && parsedPort > 0 && parsedPort <= 65535
+  ? parsedPort
+  : 9877;
 
 // ── Robot config cache ───────────────────────────────────────────────────────
 
@@ -118,6 +121,14 @@ function handleHttp(_req: IncomingMessage, res: ServerResponse): void {
 
 const httpServer = createServer(handleHttp);
 const wss = new WebSocketServer({ server: httpServer });
+
+httpServer.on("error", (err: NodeJS.ErrnoException) => {
+  if (err?.code === "EADDRINUSE") {
+    console.warn(`[bridge] port ${PORT} already in use; reusing existing bridge process.`);
+    return;
+  }
+  console.error(`[bridge] server error: ${err.message}`);
+});
 
 wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
   const remote = req.socket.remoteAddress ?? "?";

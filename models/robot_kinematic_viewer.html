@@ -1522,6 +1522,14 @@
         const wsDot = document.getElementById('ws-dot');
         const wsStatusText = document.getElementById('ws-status-text');
         let wsActive = false;
+        const wsUrlParams = new URLSearchParams(window.location.search);
+        const wsRobotId = (wsUrlParams.get('robotId') || localStorage.getItem('robotKinematic.robotId') || 'abb-crb-15000').trim();
+        let wsInstanceId = (wsUrlParams.get('instanceId') || localStorage.getItem('robotKinematic.instanceId') || '').trim();
+        if (!wsInstanceId) {
+            wsInstanceId = `viewer-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+            localStorage.setItem('robotKinematic.instanceId', wsInstanceId);
+        }
+        localStorage.setItem('robotKinematic.robotId', wsRobotId);
 
         wsToggleBtn.addEventListener('click', () => wsActive ? stopWsClient() : startWsClient());
 
@@ -1543,7 +1551,8 @@
             wsConnection = new WebSocket(url);
             wsConnection.onopen = () => {
                 wsDot.className = 'ws-dot on';
-                wsStatusText.textContent = `已连接`;
+                wsStatusText.textContent = `已连接，注册中...`;
+                sendWsReply({ cmd: 'register', robotId: wsRobotId, instanceId: wsInstanceId });
                 if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
             };
             wsConnection.onmessage = (e) => handleWsMessage(e.data);
@@ -1570,6 +1579,11 @@
         function handleWsMessage(data) {
             try {
                 const msg = JSON.parse(data);
+                if (msg.cmd === 'registered') {
+                    const rid = msg.robotId || wsRobotId;
+                    const iid = msg.instanceId || wsInstanceId;
+                    wsStatusText.textContent = `已连接 ${rid}/${iid}`;
+                }
                 if (msg.cmd === 'set_joints' && Array.isArray(msg.joints)) { setJoints(msg.joints); sendWsReply({cmd:'ok'}); }
                 else if (msg.cmd === 'get_joints') { sendWsReply({cmd:'joints', joints:getJoints()}); }
                 else if (msg.cmd === 'home') { goHome(); sendWsReply({cmd:'ok'}); }
