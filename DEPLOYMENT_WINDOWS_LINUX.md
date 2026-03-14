@@ -352,3 +352,128 @@ npm install
 3. viewer 已连接但 `totalSessions=0`
 - 原因：viewer 未完成 register（例如页面未点“连接”）。
 - 修复：刷新页面并重新点击“连接”，再查 `/status`。
+
+---
+
+## 11. 飞书集成（接收/回复）
+
+### 11.1 最小可用配置
+
+文件：`C:\Users\<用户名>\.openclaw\openclaw.json`
+
+建议确保：
+- `channels.feishu.enabled = true`
+
+- `channels.feishu.connectionMode = "websocket"`
+
+- `channels.feishu.requireMention = false`（群里可按需改回 true）
+
+- `channels.feishu.dmPolicy = "open"`（避免私聊反复进入配对门禁）
+
+- `channels.feishu.allowFrom` 包含 `"*"`（测试阶段推荐）
+
+  参考配置：
+
+  `{`
+    `"scopes": {`
+      `"tenant": [`
+        `"aily:file:read",`
+        `"aily:file:write",`
+        `"application:application.app_message_stats.overview:readonly",`
+        `"application:application:self_manage",`
+        `"application:bot.menu:write",`
+        `"cardkit:card:write",`
+        `"contact:user.employee_id:readonly",`
+        `"corehr:file:download",`
+        `"docs:document.content:read",`
+        `"event:ip_list",`
+        `"im:chat",`
+        `"im:chat.access_event.bot_p2p_chat:read",`
+        `"im:chat.members:bot_access",`
+        `"im:message",`
+        `"im:message.group_at_msg:readonly",`
+        `"im:message.group_msg",`
+        `"im:message.p2p_msg:readonly",`
+        `"im:message:readonly",`
+        `"im:message:send_as_bot",`
+        `"im:resource",`
+        `"sheets:spreadsheet",`
+        `"wiki:wiki:readonly"`
+      `],`
+      `"user": [`
+        `"aily:file:read",`
+        `"aily:file:write",`
+        `"im:chat.access_event.bot_p2p_chat:read"`
+      `]`
+    `}`
+  `}`
+
+说明：
+- 若 `dmPolicy` 未设或为 `pairing`，私聊首条消息会返回 `access not configured` 和 pairing code。
+
+### 11.2 运行态验证（实测）
+
+1. 网关健康：
+
+```powershell
+Invoke-WebRequest http://127.0.0.1:18789/health -UseBasicParsing
+```
+
+2. 查看日志是否收到飞书消息：
+
+```powershell
+Select-String -Path "C:\Users\<用户名>\AppData\Local\Temp\openclaw\openclaw-*.log" -Pattern "feishu\[default\]: received message from"
+```
+
+出现 `received message from ...` 说明“接收链路”已打通。
+
+3. 直连飞书 OpenAPI 发消息验证（排除 Agent 路由因素）：
+
+```powershell
+$cfg = Get-Content C:\Users\<用户名>\.openclaw\openclaw.json -Raw | ConvertFrom-Json
+$token = (Invoke-RestMethod -Uri 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal' -Method Post -ContentType 'application/json' -Body (@{app_id=$cfg.channels.feishu.appId; app_secret=$cfg.channels.feishu.appSecret} | ConvertTo-Json)).tenant_access_token
+
+$chatId = "<oc_xxx 聊天ID>"
+$body = @{ receive_id=$chatId; msg_type='text'; content=(@{text='OpenClaw Feishu API test'} | ConvertTo-Json -Compress) } | ConvertTo-Json -Compress
+Invoke-RestMethod -Uri 'https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id' -Method Post -Headers @{ Authorization="Bearer $token"; 'Content-Type'='application/json; charset=utf-8' } -Body $body
+```
+
+### 11.3 你这次问题的根因（已定位）
+
+本次日志证据显示：
+- 飞书消息已进入 OpenClaw（有 `received message from ...`）。
+- 但曾被 `pairing` 门禁拦截，出现：
+  - `OpenClaw: access not configured`
+  - `Pairing code: ...`
+
+因此核心不是“收不到飞书消息”，而是“未通过当前 DM 访问策略”。
+
+### 11.4 pairing 模式下的快速放行
+
+当收到 pairing code（如 `2ZELAFZA`）：
+
+```powershell
+node .\openclaw.mjs pairing approve feishu 2ZELAFZA
+```
+
+建议：
+- 生产环境可保留 `pairing`（更安全）。
+- 调试期建议设 `dmPolicy=open` 提高联调效率。
+
+### 11.5 常见错误码与处理
+
+1. `99991672`（权限不足）
+- 含义：飞书应用缺少所需 scope。
+- 本次出现过：
+  - `im:chat:readonly, im:chat, im:chat.group_info:readonly, im:chat.members:read`
+  - `docx:document, docx:document:create`
+  - `wiki:wiki, wiki:wiki:readonly, wiki:space:retrieve`
+- 处理：在飞书开放平台为应用开通对应权限并发布。
+
+2. `99992356`（chat_id 非法）
+- 含义：把 App ID（`cli_xxx`）误当成 chat_id 使用。
+- 处理：发送消息必须使用 `oc_xxx`（chat_id）或 `ou_xxx`（open_id）。
+
+3. `Action send requires a target`
+- 含义：调用 message 工具时没有可推导目标（或非飞书会话中缺少 target）。
+- 处理：显式提供 `target`（如 `chat:oc_xxx`）或在飞书原生会话中触发自动回路由。
