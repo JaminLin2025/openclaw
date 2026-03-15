@@ -14,6 +14,7 @@ set "LEGACY_PACKAGE_DIR=%LEGACY_RUNTIME_DIR%\package"
 set "BACKUP_DIR=%DEPLOY_DIR%\_persist_backup"
 set "PORT=18789"
 set "LOG_FILE=%DEPLOY_DIR%\gateway.log"
+set "ENSURE_SCRIPT=%SOURCE_DIR%\scripts\ensure-deploy-runtime.ps1"
 
 rem Numeric argument mode
 if "%~1"=="1" goto do_compile_once
@@ -342,6 +343,10 @@ call :restore_one "user-data"
 call :restore_one "extensions\managed"
 call :restore_one "extensions\custom"
 
+call :step "Ensure runtime config and required plugins"
+call :ensure_runtime_assets
+if errorlevel 1 (echo [ERROR] Runtime ensure step failed. & exit /b 1)
+
 if exist "%BACKUP_DIR%" rmdir /s /q "%BACKUP_DIR%"
 
 echo [OK] Deploy directory updated successfully.
@@ -367,7 +372,9 @@ if defined PID (
 )
 
 call :step "Start gateway in background"
-start "OpenClaw Gateway" /min cmd /c "cd /d "%PACKAGE_DIR%" && node openclaw.mjs gateway --port %PORT% --verbose >> "%LOG_FILE%" 2>&1"
+call :ensure_runtime_assets
+if errorlevel 1 (echo [ERROR] Runtime ensure step failed. & exit /b 1)
+start "OpenClaw Gateway" /min cmd /c "cd /d "%PACKAGE_DIR%" && set OPENCLAW_CONFIG_PATH=%DEPLOY_DIR%\config.runtime.json && node openclaw.mjs gateway --port %PORT% --verbose >> "%LOG_FILE%" 2>&1"
 
 call :step "Wait and run health check"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 5; try { $r=Invoke-WebRequest -Uri 'http://127.0.0.1:%PORT%' -UseBasicParsing -TimeoutSec 15; if($r.StatusCode -eq 200){ exit 0 } else { exit 2 } } catch { exit 1 }"
@@ -530,6 +537,34 @@ exit /b 0
 :stop_gateway_processes
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$procs = Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" ^| Where-Object { $_.CommandLine -match 'openclaw\.mjs\s+gateway' -or $_.CommandLine -match 'openclaw-runtime-next\\package\\openclaw\.mjs' -or $_.CommandLine -match 'openclaw-runtime-live\\package\\openclaw\.mjs' -or $_.CommandLine -match 'openclaw-runtime\\package\\openclaw\.mjs' }; foreach($p in $procs){ try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop } catch {} }" >nul 2>nul
 timeout /t 1 >nul
+exit /b 0
+
+:ensure_runtime_assets
+if not exist "%ENSURE_SCRIPT%" (
+  echo [WARN] Ensure script not found: %ENSURE_SCRIPT%
+  exit /b 0
+)
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ENSURE_SCRIPT%" -DeployDir "%DEPLOY_DIR%" -SourceDir "%SOURCE_DIR%"
+if errorlevel 1 exit /b 1
+exit /b 0
+
+:update_skills_safely
+where clawhub >nul 2>nul
+if errorlevel 1 (
+  echo [INFO] clawhub not installed. Skip skills auto-update.
+  exit /b 0
+)
+if not exist "%PACKAGE_DIR%\openclaw.mjs" (
+  echo [INFO] Runtime package not ready. Skip skills auto-update.
+  exit /b 0
+)
+cd /d "%PACKAGE_DIR%"
+call clawhub update --all >nul 2>nul
+if errorlevel 1 (
+  echo [WARN] clawhub update failed. Continue deploy.
+  exit /b 0
+)
+echo [OK] clawhub skills updated.
 exit /b 0
 
 :banner

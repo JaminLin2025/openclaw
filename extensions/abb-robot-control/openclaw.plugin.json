@@ -1,0 +1,32 @@
+{
+  "id": "abb-robot-control",
+  "channels": [],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "controllerHost": {
+        "type": "string",
+        "description": "ABB robot controller IP address or hostname"
+      },
+      "controllerPort": {
+        "type": "number",
+        "description": "ABB robot controller port (default: 7000)",
+        "minimum": 1,
+        "maximum": 65535
+      },
+      "defaultRobot": {
+        "type": "string",
+        "description": "Default robot configuration ID to use"
+      },
+      "autoConnect": {
+        "type": "boolean",
+        "description": "Automatically connect to controller on startup"
+      },
+      "rapidProgramPath": {
+        "type": "string",
+        "description": "Path on controller to store generated RAPID programs"
+      }
+    }
+  }
+}

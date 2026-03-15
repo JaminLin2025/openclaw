@@ -1,0 +1,32 @@
+{
+  "name": "@openclaw/abb-robot-control",
+  "version": "1.0.0",
+  "description": "OpenClaw MCP plugin for controlling actual ABB robots via PC SDK",
+  "type": "module",
+  "main": "index.js",
+  "openclaw": {
+    "extensions": [
+      "./index.js"
+    ]
+  },
+  "scripts": {
+    "test": "echo \"Tests not yet implemented\""
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "openclaw": "*",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
+  },
+  "peerDependencies": {
+    "openclaw": "*"
+  },
+  "keywords": [
+    "openclaw",
+    "abb",
+    "robot",
+    "automation",
+    "pc-sdk",
+    "mcp"
+  ]
+}
