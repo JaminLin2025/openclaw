@@ -183,13 +183,14 @@ function Ensure-PluginRuntimeDependencies([string]$extensionsDir, [string]$plugi
   }
 
   Write-Info "Installing runtime dependencies for plugin: $pluginId"
-  $proc = Start-Process -FilePath 'npm' -ArgumentList @('install', '--omit=dev', '--no-audit', '--no-fund') -WorkingDirectory $pluginDir -NoNewWindow -PassThru
-  if (-not (Wait-Process -Id $proc.Id -Timeout 180 -ErrorAction SilentlyContinue)) {
-    Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-    throw "Strong validation failed: npm install timed out for plugin '$pluginId'"
-  }
-  if ($proc.ExitCode -ne 0) {
-    throw "Strong validation failed: npm install failed for plugin '$pluginId' (exit code $($proc.ExitCode))"
+  Push-Location $pluginDir
+  try {
+    cmd /c npm install --omit=dev --no-audit --no-fund | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      throw "Strong validation failed: npm install failed for plugin '$pluginId' (exit code $LASTEXITCODE)"
+    }
+  } finally {
+    Pop-Location
   }
 
   if ($pluginId -eq 'feishu') {
@@ -233,7 +234,7 @@ $runtimeEntries = Ensure-Hashtable $runtimePlugins.entries
 $runtimeInstalls = Ensure-Hashtable $runtimePlugins.installs
 
 # Always-required plugins for this deployment.
-$requiredPluginIds = @('abb-robot-control', 'feishu', 'qwen-portal-auth', 'robot-kinematic')
+$requiredPluginIds = @('abb-robot-control', 'feishu', 'qwen-portal-auth')
 
 # Merge user plugin entries so previously working plugins are not dropped.
 if ($null -ne $userCfg -and $null -ne $userCfg.plugins -and $null -ne $userCfg.plugins.entries) {
@@ -252,8 +253,16 @@ foreach ($pluginId in $requiredPluginIds) {
   }
 }
 
+# robot-kinematic is loaded from trusted discovery to avoid duplicate id ambiguity across extension roots.
+if ($runtimeEntries.ContainsKey('robot-kinematic')) {
+  $runtimeEntries.Remove('robot-kinematic')
+}
+if ($runtimeInstalls.ContainsKey('robot-kinematic')) {
+  $runtimeInstalls.Remove('robot-kinematic')
+}
+
 # Enforce explicit trusted plugin allow-list to avoid accidental auto-loading from user directories.
-$trustedPluginIds = @($runtimeEntries.Keys | Sort-Object -Unique)
+$trustedPluginIds = @($runtimeEntries.Keys + @('robot-kinematic') | Sort-Object -Unique)
 $runtimePlugins['allow'] = $trustedPluginIds
 
 # Preserve Feishu channel config from user config when runtime config does not have it.
@@ -269,6 +278,28 @@ if (-not $runtimeChannels.ContainsKey('feishu')) {
       Write-Info 'Imported channels.feishu from user config backup.'
     }
   }
+}
+
+# Normalize Feishu runtime behavior for inbound message handling.
+if ($runtimeChannels.ContainsKey('feishu')) {
+  $fei = Ensure-Hashtable $runtimeChannels['feishu']
+  $fei['enabled'] = $true
+  if (-not $fei.ContainsKey('connectionMode') -or -not (Has-Value $fei['connectionMode'])) {
+    $fei['connectionMode'] = 'websocket'
+  }
+  # Avoid DM pairing gate after restart/publish; keep DM channel open for this deployment profile.
+  $fei['dmPolicy'] = 'open'
+  $allow = @()
+  if ($fei.ContainsKey('allowFrom') -and $null -ne $fei['allowFrom']) {
+    foreach ($x in $fei['allowFrom']) { $allow += "$x" }
+  }
+  if (-not ($allow -contains '*')) {
+    $allow += '*'
+  }
+  $fei['allowFrom'] = $allow
+  # In DM/group without explicit @ mention, requireMention=true can cause incoming messages to be ignored.
+  $fei['requireMention'] = $false
+  $runtimeChannels['feishu'] = $fei
 }
 
 # Strong validation for Feishu when plugin is enabled.
@@ -289,16 +320,6 @@ if ($feishuEnabled) {
   }
 }
 
-# Normalize robot-kinematic install metadata to deploy runtime path to prevent duplicate load from user profile path.
-$runtimeRobotKinematicPath = Join-Path $packageExtensionsDir 'robot-kinematic'
-$runtimeInstalls['robot-kinematic'] = @{
-  source = 'path'
-  sourcePath = $modelPluginDir
-  installPath = $runtimeRobotKinematicPath
-  version = '1.0.0'
-  installedAt = (Get-Date).ToString('o')
-}
-
 $runtimePlugins['entries'] = $runtimeEntries
 $runtimePlugins['installs'] = $runtimeInstalls
 Set-ObjectProperty -obj $runtimeCfg -name 'plugins' -value $runtimePlugins
@@ -312,6 +333,10 @@ New-Item -ItemType Directory -Path $packageExtensionsDir -Force | Out-Null
 
 $pluginIdsToSync = @($runtimeEntries.Keys)
 foreach ($pluginId in $pluginIdsToSync) {
+  if ($pluginId -eq 'robot-kinematic') {
+    continue
+  }
+
   $srcCandidates = @(
     (Join-Path $sourceExtensionsDir $pluginId),
     (Join-Path $userExtensionsDir $pluginId)
@@ -339,6 +364,13 @@ foreach ($pluginId in $pluginIdsToSync) {
   } else {
     throw "Failed to sync plugin $pluginId from $src"
   }
+}
+
+# Ensure only one robot-kinematic source is visible to runtime to avoid duplicate plugin id warnings.
+$runtimeRobotKinematicMirror = Join-Path $packageExtensionsDir 'robot-kinematic'
+if (Test-Path $runtimeRobotKinematicMirror) {
+  Remove-Item -Path $runtimeRobotKinematicMirror -Recurse -Force -ErrorAction SilentlyContinue
+  Write-Info 'Removed deploy mirror for robot-kinematic to avoid duplicate plugin id detection.'
 }
 
 # Ensure critical plugin runtime dependencies after sync.
