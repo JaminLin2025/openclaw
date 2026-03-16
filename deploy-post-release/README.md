@@ -17,7 +17,10 @@ Use these scripts after code updates to ensure:
 - `01_publish_only.bat`: Publish deploy runtime only
 - `02_restart_only.bat`: Restart service only
 - `03_publish_restart_verify.bat`: Publish + restart + verification (recommended)
+- `04_quick_regression.bat`: Self-check + verify (post-release quick health gate)
+- `05_capture_snapshot.bat`: Capture runtime/environment snapshot
 - `verify_post_release.ps1`: Automated runtime checks
+- `capture_snapshot.ps1`: Snapshot collector (JSON output to `logs/`)
 - `DEPLOYMENT_POST_RELEASE.md`: Post-release operations handbook (Chinese)
 
 ## Recommended workflow
@@ -51,6 +54,9 @@ Alternative one-shot workflow:
 - `release-verify` or `3`
 - `verify` or `4`
 - `logs` or `5`
+- `self-check` or `6`
+- `quick-regression` or `7`
+- `snapshot` or `8`
 - `docs`
 
 Examples:
@@ -59,6 +65,22 @@ Examples:
 Set-Location "D:\OpenClaw\Develop\openclaw\deploy-post-release"
 .\00_post_release_menu.bat release-verify
 .\00_post_release_menu.bat verify
+.\00_post_release_menu.bat quick-regression
+.\00_post_release_menu.bat snapshot
+```
+
+One-shot script alternative:
+
+```powershell
+Set-Location "D:\OpenClaw\Develop\openclaw\deploy-post-release"
+.\04_quick_regression.bat
+.\05_capture_snapshot.bat
+```
+
+Snapshot files are saved under:
+
+```text
+deploy-post-release\logs\snapshot-YYYYMMDD-HHMMSS.json
 ```
 
 ## What verification checks

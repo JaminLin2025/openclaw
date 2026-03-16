@@ -121,7 +121,8 @@ function Ensure-RequiredSkills([string]$packageDir, [array]$requiredSkillSlugs, 
 
   $localSkillSources = @(
     (Join-Path $env:USERPROFILE '.openclaw\skills'),
-    (Join-Path $sourceDir 'skills')
+    (Join-Path $sourceDir 'skills'),
+    (Join-Path (Split-Path -Parent (Split-Path -Parent $sourceDir)) 'skills')
   )
 
   foreach ($slug in $requiredSkillSlugs) {
@@ -146,7 +147,8 @@ function Ensure-RequiredSkills([string]$packageDir, [array]$requiredSkillSlugs, 
 
     if (-not $copied) {
       Write-Info "Installing required skill from registry: $slug"
-      $proc = Start-Process -FilePath 'clawhub' -ArgumentList @('install', $slug) -WorkingDirectory $packageDir -NoNewWindow -PassThru
+      $cmdLine = "clawhub install $slug"
+      $proc = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/c', $cmdLine) -WorkingDirectory $packageDir -NoNewWindow -PassThru
       if (-not (Wait-Process -Id $proc.Id -Timeout 120 -ErrorAction SilentlyContinue)) {
         Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
         throw "Strong validation failed: clawhub install timed out for skill '$slug'"
@@ -198,6 +200,49 @@ function Ensure-PluginRuntimeDependencies([string]$extensionsDir, [string]$plugi
     if (-not (Test-Path $axiosPath)) {
       throw "Strong validation failed: plugin '$pluginId' still missing runtime module 'axios' after dependency install"
     }
+  }
+}
+
+function Ensure-CoreRuntimeDependencies([string]$packageDir, [array]$moduleNames) {
+  if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
+    throw 'Strong validation failed: npm is unavailable. Cannot install core runtime dependencies.'
+  }
+
+  foreach ($name in $moduleNames) {
+    $modulePath = Join-Path $packageDir ("node_modules\" + $name)
+    if (Test-Path $modulePath) {
+      continue
+    }
+
+    Write-Info "Installing missing core runtime dependency: $name"
+    Push-Location $packageDir
+    try {
+      cmd /c npm install --omit=dev --no-audit --no-fund $name | Out-Null
+      if ($LASTEXITCODE -ne 0) {
+        throw "Strong validation failed: npm install failed for core dependency '$name' (exit code $LASTEXITCODE)"
+      }
+    } finally {
+      Pop-Location
+    }
+
+    if (-not (Test-Path $modulePath)) {
+      throw "Strong validation failed: core runtime dependency still missing after install: $name"
+    }
+  }
+}
+
+function Ensure-CoreRuntimeShims([string]$packageDir) {
+  $yamlDir = Join-Path $packageDir 'node_modules\yaml'
+  $yamlIndex = Join-Path $yamlDir 'index.js'
+  $yamlDistIndex = Join-Path $yamlDir 'dist\index.js'
+
+  if ((Test-Path $yamlDir) -and (-not (Test-Path $yamlIndex)) -and (Test-Path $yamlDistIndex)) {
+    Write-Info 'Creating runtime shim: node_modules/yaml/index.js -> dist/index.js'
+    @(
+      "export * from './dist/index.js';",
+      "import yamlDefault from './dist/index.js';",
+      "export default yamlDefault;"
+    ) | Set-Content -Path $yamlIndex -Encoding UTF8
   }
 }
 
@@ -375,6 +420,10 @@ if (Test-Path $runtimeRobotKinematicMirror) {
 
 # Ensure critical plugin runtime dependencies after sync.
 Ensure-PluginRuntimeDependencies -extensionsDir $packageExtensionsDir -pluginId 'feishu'
+
+# Ensure critical core runtime dependency required by dist entry path.
+Ensure-CoreRuntimeDependencies -packageDir $packageDir -moduleNames @('chalk')
+Ensure-CoreRuntimeShims -packageDir $packageDir
 
 Write-Info 'Runtime ensure completed successfully.'
 

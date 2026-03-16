@@ -55,7 +55,10 @@ Set-Location "D:\OpenClaw\Develop\openclaw"
 - `01_publish_only.bat`
 - `02_restart_only.bat`
 - `03_publish_restart_verify.bat`
+- `04_quick_regression.bat`
+- `05_capture_snapshot.bat`
 - `verify_post_release.ps1`
+- `capture_snapshot.ps1`
 - `DEPLOYMENT_POST_RELEASE.md`（发布后操作手册）
 
 建议直接执行：
@@ -70,6 +73,20 @@ Set-Location "D:\OpenClaw\Develop\openclaw\deploy-post-release"
 ```powershell
 Set-Location "D:\OpenClaw\Develop\openclaw\deploy-post-release"
 .\03_publish_restart_verify.bat
+```
+
+快速健康闸门（推荐在发布后补跑一次）：
+
+```powershell
+Set-Location "D:\OpenClaw\Develop\openclaw\deploy-post-release"
+.\00_post_release_menu.bat quick-regression
+```
+
+问题回溯建议先采集快照：
+
+```powershell
+Set-Location "D:\OpenClaw\Develop\openclaw\deploy-post-release"
+.\00_post_release_menu.bat snapshot
 ```
 
 该流程会自动校验：

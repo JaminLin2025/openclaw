@@ -286,6 +286,11 @@ if defined PID (
   powershell -NoProfile -ExecutionPolicy Bypass -Command "Stop-Process -Id %PID% -Force" >nul 2>nul
   timeout /t 1 >nul
 )
+call :wait_runtime_release
+if errorlevel 1 (
+  echo [ERROR] Runtime processes did not stop cleanly. Abort publish.
+  exit /b 1
+)
 
 call :step "Create tgz package in deploy directory"
 cd /d "%SOURCE_DIR%" || (echo [ERROR] Cannot enter source directory: %SOURCE_DIR% & exit /b 1)
@@ -329,12 +334,28 @@ if not exist "%PACKAGE_DIR%" if exist "%LEGACY_PACKAGE_DIR%" (
 )
 
 call :step "Replace runtime directory"
-if exist "%RUNTIME_DIR%" rmdir /s /q "%RUNTIME_DIR%"
-if exist "%RUNTIME_DIR%" (
-  echo [ERROR] Cannot clean runtime directory (maybe locked): %RUNTIME_DIR%
+call :wait_runtime_release
+if errorlevel 1 (
+  echo [ERROR] Runtime processes still active before directory replacement.
   exit /b 1
 )
-mkdir "%RUNTIME_DIR%"
+call :assert_runtime_writable
+if errorlevel 1 exit /b 1
+if exist "%RUNTIME_DIR%" (
+  call :stop_runtime_lockers
+  rmdir /s /q "%RUNTIME_DIR%"
+)
+if exist "%RUNTIME_DIR%" (
+  call :step "Retry cleanup runtime directory"
+  timeout /t 1 >nul
+  call :stop_runtime_lockers
+  rmdir /s /q "%RUNTIME_DIR%"
+)
+if exist "%RUNTIME_DIR%" (
+  echo [WARN] Cannot fully clean runtime directory ^(maybe locked^): %RUNTIME_DIR%
+  echo [INFO] Continue with in-place runtime update.
+)
+if not exist "%RUNTIME_DIR%" mkdir "%RUNTIME_DIR%"
 if errorlevel 1 (echo [ERROR] Cannot create runtime directory: %RUNTIME_DIR% & exit /b 1)
 
 call :step "Extract package to runtime directory"
@@ -345,9 +366,9 @@ if not exist "%PACKAGE_DIR%\openclaw.mjs" (
   exit /b 1
 )
 
-call :step "Install runtime dependencies: pnpm install --prod --ignore-scripts"
+call :step "Install runtime dependencies: pnpm install --prod"
 cd /d "%PACKAGE_DIR%" || (echo [ERROR] Runtime package directory not found: %PACKAGE_DIR% & exit /b 1)
-call pnpm install --prod --ignore-scripts
+call pnpm install --prod
 if errorlevel 1 (echo [ERROR] Runtime dependency install failed. & exit /b 1)
 
 call :step "Sync built runtime dist"
@@ -403,6 +424,11 @@ call :step "Try graceful gateway stop"
 cd /d "%PACKAGE_DIR%"
 call node openclaw.mjs gateway stop >nul 2>nul
 call :stop_gateway_processes
+call :wait_port_free %PORT%
+if errorlevel 1 (
+  echo [ERROR] Port %PORT% is still occupied after stop.
+  exit /b 1
+)
 
 call :step "Release port %PORT% if occupied"
 set "PID="
@@ -414,7 +440,7 @@ if defined PID (
 call :step "Start gateway in background"
 call :ensure_runtime_assets
 if errorlevel 1 (echo [ERROR] Runtime ensure step failed. & exit /b 1)
-start "OpenClaw Gateway" /min cmd /c "cd /d "%PACKAGE_DIR%" && set OPENCLAW_CONFIG_PATH=%DEPLOY_DIR%\config.runtime.json && node openclaw.mjs gateway --port %PORT% --verbose >> "%LOG_FILE%" 2>&1"
+start "OpenClaw Gateway" /min cmd /c ""cd /d "%PACKAGE_DIR%" && set OPENCLAW_CONFIG_PATH=%DEPLOY_DIR%\config.runtime.json && node openclaw.mjs gateway --port %PORT% --verbose >> "%LOG_FILE%" 2>&1""
 
 call :step "Wait and run health check"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 5; try { $r=Invoke-WebRequest -Uri 'http://127.0.0.1:%PORT%' -UseBasicParsing -TimeoutSec 15; if($r.StatusCode -eq 200){ exit 0 } else { exit 2 } } catch { exit 1 }"
@@ -511,7 +537,7 @@ for /f "delims=" %%P in ('powershell -NoProfile -ExecutionPolicy Bypass -Command
 if defined PID powershell -NoProfile -ExecutionPolicy Bypass -Command "Stop-Process -Id %PID% -Force" >nul 2>nul
 
 call :step "Start gateway from target directory"
-start "OpenClaw Gateway %TARGET_PORT%" /min cmd /c "cd /d "%TARGET_DIR%" && node openclaw.mjs gateway --port %TARGET_PORT% --verbose >> "%DEPLOY_DIR%\gateway-%TARGET_PORT%.log" 2>&1"
+start "OpenClaw Gateway %TARGET_PORT%" /min cmd /c ""cd /d "%TARGET_DIR%" && node openclaw.mjs gateway --port %TARGET_PORT% --verbose >> "%DEPLOY_DIR%\gateway-%TARGET_PORT%.log" 2>&1""
 
 call :step "Health check"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 8; try { $r=Invoke-WebRequest -Uri 'http://127.0.0.1:%TARGET_PORT%' -UseBasicParsing -TimeoutSec 15; if($r.StatusCode -eq 200){ exit 0 } else { exit 2 } } catch { exit 1 }"
@@ -577,6 +603,54 @@ exit /b 0
 :stop_gateway_processes
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$procs = Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" ^| Where-Object { $_.CommandLine -match 'openclaw\.mjs\s+gateway' -or $_.CommandLine -match 'openclaw-runtime-next\\package\\openclaw\.mjs' -or $_.CommandLine -match 'openclaw-runtime-live\\package\\openclaw\.mjs' -or $_.CommandLine -match 'openclaw-runtime\\package\\openclaw\.mjs' }; foreach($p in $procs){ try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop } catch {} }" >nul 2>nul
 timeout /t 1 >nul
+exit /b 0
+
+:wait_runtime_release
+call :stop_runtime_lockers
+call :wait_port_free %PORT%
+if errorlevel 1 exit /b 1
+exit /b 0
+
+:wait_port_free
+set "WAIT_PORT=%~1"
+if "%WAIT_PORT%"=="" set "WAIT_PORT=%PORT%"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=%WAIT_PORT%; $deadline=(Get-Date).AddSeconds(30); while((Get-Date)-lt $deadline){ $c=Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue; if(-not $c){ exit 0 }; Start-Sleep -Milliseconds 500 }; exit 1" >nul 2>nul
+if errorlevel 1 exit /b 1
+exit /b 0
+
+:stop_runtime_lockers
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$target=[regex]::Escape('%RUNTIME_DIR%'); $procs=Get-CimInstance Win32_Process ^| Where-Object { $_.Name -in @('node.exe','cmd.exe','npm.exe','pnpm.exe') -and $_.CommandLine -match $target }; foreach($p in $procs){ try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop } catch {} }" >nul 2>nul
+timeout /t 1 >nul
+exit /b 0
+
+:assert_runtime_writable
+if not exist "%RUNTIME_DIR%" exit /b 0
+set "WRITE_TEST_FILE=%RUNTIME_DIR%\.__openclaw_write_test__"
+del /f /q "%WRITE_TEST_FILE%" >nul 2>nul
+echo ok>"%WRITE_TEST_FILE%" 2>nul
+if errorlevel 1 (
+  echo [ERROR] Runtime directory is not writable: %RUNTIME_DIR%
+  echo [INFO] Close any terminals/processes using this path and rerun.
+  echo [INFO] If denied persists, run elevated command:
+  echo [INFO]   icacls "%RUNTIME_DIR%" /grant *S-1-1-0:^(OI^)^(CI^)F /T /C
+  exit /b 1
+)
+del /f /q "%WRITE_TEST_FILE%" >nul 2>nul
+
+if exist "%RUNTIME_DIR%\package\dist" (
+  set "WRITE_TEST_FILE=%RUNTIME_DIR%\package\dist\.__openclaw_write_test__"
+  del /f /q "%WRITE_TEST_FILE%" >nul 2>nul
+  echo ok>"%WRITE_TEST_FILE%" 2>nul
+  if errorlevel 1 (
+    echo [ERROR] Runtime dist directory is not writable: %RUNTIME_DIR%\package\dist
+    echo [INFO] Close any terminals/processes using this path and rerun.
+    echo [INFO] If denied persists, run elevated commands:
+    echo [INFO]   icacls "%RUNTIME_DIR%\package\dist" /grant *S-1-1-0:^(OI^)^(CI^)F /T /C
+    echo [INFO]   attrib -R "%RUNTIME_DIR%\package\dist\*" /S /D
+    exit /b 1
+  )
+  del /f /q "%WRITE_TEST_FILE%" >nul 2>nul
+)
 exit /b 0
 
 :ensure_runtime_assets
