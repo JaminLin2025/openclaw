@@ -6,7 +6,11 @@ set "BASE_DIR=%~dp0"
 if "%BASE_DIR:~-1%"=="\" set "BASE_DIR=%BASE_DIR:~0,-1%"
 set "SNAPSHOT_SCRIPT=%BASE_DIR%\capture_snapshot.ps1"
 set "PROJECT_DIR=%BASE_DIR%\.."
-set "DEPLOY_DIR=D:\OpenClaw\deploy"
+if defined OPENCLAW_DEPLOY_DIR (
+  set "DEPLOY_DIR=%OPENCLAW_DEPLOY_DIR%"
+) else (
+  set "DEPLOY_DIR=D:\OpenClaw\deploy"
+)
 
 if not exist "%SNAPSHOT_SCRIPT%" (
   echo [ERROR] Missing script: %SNAPSHOT_SCRIPT%
