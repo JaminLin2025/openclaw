@@ -16,7 +16,7 @@
 ## 1. 当前运行基线
 
 - 源码目录：`D:\OpenClaw\Develop\openclaw`
-- 部署目录：`D:\OpenClaw\deploy`
+- 部署目录：`D:\OpenClaw\deploy`（可通过环境变量 `OPENCLAW_DEPLOY_DIR` 自定义）
 - 运行目录：`D:\OpenClaw\deploy\openclaw-runtime-next\package`
 - 网关地址：`http://127.0.0.1:18789`
 
@@ -119,7 +119,7 @@ pnpm pack --pack-destination D:\OpenClaw\deploy --config.ignore-scripts=true
 
 ```powershell
 $deploy = "D:\OpenClaw\deploy"
-$tgz = Join-Path $deploy "openclaw-2026.3.13.tgz"
+$tgz = Get-ChildItem -Path $deploy -Filter "openclaw-*.tgz" | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
 $runtime = Join-Path $deploy "openclaw-runtime-next"
 
 if (Test-Path $runtime) { Remove-Item -Recurse -Force $runtime }
@@ -169,7 +169,7 @@ Invoke-WebRequest -Uri "http://127.0.0.1:18789" -UseBasicParsing
 
 ## 5. 阿里云百炼接入（重点）
 
-### 4.1 最小可用配置
+### 5.1 最小可用配置
 
 ```powershell
 Set-Location "D:\OpenClaw\deploy\openclaw-runtime-next\package"
@@ -183,14 +183,14 @@ node .\openclaw.mjs config set agents.defaults.model.primary "bailian/qwen3.5-pl
 node .\openclaw.mjs config set agents.defaults.models '{"bailian/qwen3.5-plus":{},"bailian/qwen3-coder-plus":{}}' --strict-json
 ```
 
-### 4.2 重启生效
+### 5.2 重启生效
 
 ```powershell
 node .\openclaw.mjs gateway stop
 node .\openclaw.mjs gateway run --port 18789 --verbose
 ```
 
-### 4.3 Web 侧切换与验证
+### 5.3 Web 侧切换与验证
 
 ```text
 /models
@@ -204,7 +204,7 @@ node .\openclaw.mjs gateway run --port 18789 --verbose
 
 ## 6. 本次故障根因与修复结论
 
-### 5.1 启动不来（已解决）
+### 6.1 启动不来（已解决）
 
 根因：
 - 系统服务（Scheduled Task）历史命令路径残留，可能指向旧目录。
@@ -219,7 +219,7 @@ node .\openclaw.mjs gateway install --force --port 18789
 node .\openclaw.mjs gateway start
 ```
 
-### 5.2 百炼连接不上（已定位并解决）
+### 6.2 百炼连接不上（已定位并解决）
 
 根因：
 - API Key 与 endpoint 类型不匹配。
@@ -281,7 +281,7 @@ Web：
 
 ## 9. 常用命令速查（插件/状态/排障）
 
-### 8.1 网关与健康
+### 9.1 网关与健康
 
 ```powershell
 node .\openclaw.mjs gateway status
@@ -291,7 +291,7 @@ node .\openclaw.mjs health --verbose
 node .\openclaw.mjs status --deep
 ```
 
-### 8.2 配置与模型
+### 9.2 配置与模型
 
 ```powershell
 node .\openclaw.mjs config file
@@ -303,7 +303,7 @@ node .\openclaw.mjs models status
 node .\openclaw.mjs models set <provider/model>
 ```
 
-### 8.3 插件管理
+### 9.3 插件管理
 
 ```powershell
 node .\openclaw.mjs plugins list
@@ -314,7 +314,7 @@ node .\openclaw.mjs plugins disable <plugin-id>
 node .\openclaw.mjs plugins doctor
 ```
 
-### 8.4 Web slash 命令
+### 9.4 Web slash 命令
 
 ```text
 /status
@@ -344,7 +344,7 @@ node .\openclaw.mjs plugins doctor
 目标：通过 `skills/robot-kinematic` 驱动本地 viewer：
 - `D:/OpenClaw/Develop/openclaw/models/robot_kinematic_viewer.html`
 
-### 10.1 启用检查
+### 11.1 启用检查
 
 先确认插件配置包含并启用：
 
@@ -358,7 +358,7 @@ node .\openclaw.mjs config get plugins.entries.robot-kinematic
 - `plugins.allow` 包含 `robot-kinematic`
 - `plugins.entries.robot-kinematic.enabled = true`
 
-### 10.2 正确启动顺序（避免端口冲突）
+### 11.2 正确启动顺序（避免端口冲突）
 
 1. 只保留一个网关实例：
 
@@ -382,7 +382,7 @@ node .\openclaw.mjs gateway run --port 18789 --verbose
 说明：viewer 已在连接成功后自动发送 `register`（包含 `robotId/instanceId`），
 桥接可识别会话，`robot_control` 才能下发动作。
 
-### 10.3 连通性验证
+### 11.3 连通性验证
 
 验证桥接状态（9877）：
 
@@ -403,7 +403,7 @@ $obj.connected | ConvertTo-Json -Depth 6
 node .\openclaw.mjs agent --session-id robot-debug --message "请调用 robot_control，action=list_connections，并只输出工具结果。" --json --timeout 120
 ```
 
-### 10.4 常见问题与修复
+### 11.4 常见问题与修复
 
 1. `EADDRINUSE 127.0.0.1:9877`
 - 原因：已有 bridge 占用 9877，或重复启动多个网关/插件进程。
@@ -433,7 +433,7 @@ npm install
 
 ## 12. 飞书集成（接收/回复）
 
-### 11.1 最小可用配置
+### 12.1 最小可用配置
 
 文件：`C:\Users\<用户名>\.openclaw\openclaw.json`
 
@@ -487,7 +487,7 @@ npm install
 说明：
 - 若 `dmPolicy` 未设或为 `pairing`，私聊首条消息会返回 `access not configured` 和 pairing code。
 
-### 11.2 运行态验证（实测）
+### 12.2 运行态验证（实测）
 
 1. 网关健康：
 
@@ -514,7 +514,7 @@ $body = @{ receive_id=$chatId; msg_type='text'; content=(@{text='OpenClaw Feishu
 Invoke-RestMethod -Uri 'https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id' -Method Post -Headers @{ Authorization="Bearer $token"; 'Content-Type'='application/json; charset=utf-8' } -Body $body
 ```
 
-### 11.3 你这次问题的根因（已定位）
+### 12.3 你这次问题的根因（已定位）
 
 本次日志证据显示：
 - 飞书消息已进入 OpenClaw（有 `received message from ...`）。
@@ -524,7 +524,7 @@ Invoke-RestMethod -Uri 'https://open.feishu.cn/open-apis/im/v1/messages?receive_
 
 因此核心不是“收不到飞书消息”，而是“未通过当前 DM 访问策略”。
 
-### 11.4 pairing 模式下的快速放行
+### 12.4 pairing 模式下的快速放行
 
 当收到 pairing code（如 `2ZELAFZA`）：
 
@@ -536,7 +536,7 @@ node .\openclaw.mjs pairing approve feishu 2ZELAFZA
 - 生产环境可保留 `pairing`（更安全）。
 - 调试期建议设 `dmPolicy=open` 提高联调效率。
 
-### 11.5 常见错误码与处理
+### 12.5 常见错误码与处理
 
 1. `99991672`（权限不足）
 - 含义：飞书应用缺少所需 scope。

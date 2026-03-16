@@ -6,7 +6,11 @@ title OpenClaw Deploy Helper
 
 set "SOURCE_DIR=%~dp0"
 if "%SOURCE_DIR:~-1%"=="\" set "SOURCE_DIR=%SOURCE_DIR:~0,-1%"
-set "DEPLOY_DIR=D:\OpenClaw\deploy"
+if defined OPENCLAW_DEPLOY_DIR (
+  set "DEPLOY_DIR=%OPENCLAW_DEPLOY_DIR%"
+) else (
+  set "DEPLOY_DIR=D:\OpenClaw\deploy"
+)
 set "RUNTIME_DIR=%DEPLOY_DIR%\openclaw-runtime-next"
 set "PACKAGE_DIR=%RUNTIME_DIR%\package"
 set "LEGACY_RUNTIME_DIR=%DEPLOY_DIR%\openclaw-runtime-live"
@@ -66,7 +70,7 @@ echo [V] Verify post-release runtime health
 echo [R] Publish + Restart + Verify (recommended)
 echo [0] Exit
 set "CHOICE="
-set /p "CHOICE=Select [0-9]: " || goto done
+set /p "CHOICE=Select [0-9, V, R]: " || goto done
 if not defined CHOICE goto done
 
 if "%CHOICE%"=="1" goto do_compile
