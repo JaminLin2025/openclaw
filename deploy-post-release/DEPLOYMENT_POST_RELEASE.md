@@ -119,6 +119,18 @@ Set-Location "D:\OpenClaw\Develop\openclaw\deploy-post-release"
 - 项目根目录 `deploy_menu.bat` 提供全量部署能力。
 - `deploy-post-release` 目录专注发布后动作，便于运维与归档。
 - 建议发布后固定使用本目录脚本，减少遗漏。
+- 若部署目录不在默认路径，可通过环境变量 `OPENCLAW_DEPLOY_DIR` 自定义：
+
+```powershell
+$env:OPENCLAW_DEPLOY_DIR = "E:\MyDeploy"
+.\00_post_release_menu.bat release-verify
+```
+
+- PowerShell 脚本也支持参数传入自定义路径：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\verify_post_release.ps1 -ProjectDir "C:\MyProject\openclaw" -DeployDir "E:\MyDeploy" -Port 18789
+```
 
 ## 6. 稳定性增强说明
 

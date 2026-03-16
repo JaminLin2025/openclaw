@@ -100,6 +100,10 @@ deploy-post-release\logs\snapshot-YYYYMMDD-HHMMSS.json
   - `xiucheng-self-improving-agent`
 - Recent `gateway.log` does not contain:
   - `Cannot find module 'axios'`
+  - `Cannot find package`
+  - `missing dist/entry.`
+  - `too many arguments for 'gateway'`
+  - `too many arguments for 'run'`
   - `feishu failed to load`
   - `failed to load plugin`
   - `plugins.allow is empty`
@@ -108,6 +112,14 @@ deploy-post-release\logs\snapshot-YYYYMMDD-HHMMSS.json
 
 - Default project path: `D:\OpenClaw\Develop\openclaw`
 - Default deploy path: `D:\OpenClaw\deploy`
-- If your paths differ, edit `verify_post_release.ps1` parameters or pass custom arguments.
+- To customize the deploy path, set the `OPENCLAW_DEPLOY_DIR` environment variable before running any script:
+  ```powershell
+  $env:OPENCLAW_DEPLOY_DIR = "E:\MyDeploy"
+  .\00_post_release_menu.bat release-verify
+  ```
+- PowerShell scripts (`verify_post_release.ps1`, `capture_snapshot.ps1`) also accept custom paths via parameters:
+  ```powershell
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\verify_post_release.ps1 -ProjectDir "C:\MyProject\openclaw" -DeployDir "E:\MyDeploy" -Port 18789
+  ```
 - For daily operations, use this folder as the single source of truth.
 - Scripts now include preflight checks for missing sibling scripts and key entry files to fail fast with clear messages.

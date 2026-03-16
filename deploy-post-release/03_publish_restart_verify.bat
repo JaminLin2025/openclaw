@@ -5,7 +5,11 @@ chcp 65001 >nul
 set "BASE_DIR=%~dp0"
 if "%BASE_DIR:~-1%"=="\" set "BASE_DIR=%BASE_DIR:~0,-1%"
 set "PROJECT_DIR=%BASE_DIR%\.."
-set "DEPLOY_DIR=D:\OpenClaw\deploy"
+if defined OPENCLAW_DEPLOY_DIR (
+  set "DEPLOY_DIR=%OPENCLAW_DEPLOY_DIR%"
+) else (
+  set "DEPLOY_DIR=D:\OpenClaw\deploy"
+)
 set "PORT=18789"
 set "VERIFY_SCRIPT=%BASE_DIR%\verify_post_release.ps1"
 
