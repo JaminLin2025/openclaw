@@ -21,7 +21,9 @@ Control actual ABB robots via PC SDK through natural language commands.
 
 | User Request | Action |
 |---|---|
+| "Connect virtual robot viewer" | `abb_robot` action:`connect` mode:`virtual` port:`9877` |
 | "Connect to robot at 192.168.1.10" | `abb_robot` action:`connect` host:`192.168.1.10` |
+| "Connect IRB-120 profile robot" | `abb_robot` action:`connect` mode:`real` host:`127.0.0.1` robot_profile:`abb-irb-120` |
 | "Disconnect from robot" | `abb_robot` action:`disconnect` |
 | "Move robot to home" | `abb_robot` action:`go_home` |
 | "Set joint 1 to 45 degrees" | `abb_robot` action:`set_joints` joints:`[45,0,0,0,0,0]` |
@@ -30,6 +32,8 @@ Control actual ABB robots via PC SDK through natural language commands.
 | "Execute wave sequence" | `abb_robot` action:`run_sequence` sequence:`wave_sequence` |
 | "Get current position" | `abb_robot` action:`get_joints` |
 | "Check robot status" | `abb_robot` action:`get_status` |
+| "Query robot logs" | `abb_robot_real` action:`get_event_log` categoryId:`0` limit:`20` |
+| "Analyze robot log errors" | `abb_robot_real` action:`analyze_logs` categoryId:`0` limit:`30` |
 | "Turn motors on" | `abb_robot` action:`motors_on` |
 | "Turn motors off" | `abb_robot` action:`motors_off` |
 | "List available robots" | `abb_robot` action:`list_robots` |
@@ -60,6 +64,62 @@ Before controlling the robot, establish connection:
 ```
 User: Connect to the ABB robot at 192.168.125.1
 Tool: abb_robot action:connect host:192.168.125.1
+```
+
+Virtual viewer control (recommended when driving `robot_kinematic_viewer.html`):
+
+```
+User: Connect to virtual viewer
+Tool: abb_robot action:connect mode:virtual port:9877
+```
+
+Notes:
+- For virtual motion, always set `mode:virtual` explicitly.
+- `port:9877` is the WebSocket bridge, not ABB controller port 7000.
+- If you use auto mode while previously connected in real mode, commands may stay in real mode.
+
+Real RobotStudio / real robot local test example:
+
+```
+abb_robot action:connect mode:real host:127.0.0.1 port:7000 robot_profile:abb-irb-120
+```
+
+Bridge reliability behavior:
+- Real mode connect now uses NetScan discovery first, then connects using matched ControllerInfo.
+- Host can be IP / controller ID / SystemId / SystemName.
+- For `127.0.0.1`/`localhost`, the bridge will prefer virtual RobotStudio controllers discovered by NetScan.
+
+## Control Precheck Behavior
+
+Before motion actions (`set_joints`, `movj`, `go_home`, `execute_rapid`, `motors_on`, `motors_off`),
+the plugin now checks:
+
+- whether a robot is connected
+- current connected type (`virtual` or `real`)
+- environment readiness for virtual viewer control
+
+If not ready, control is blocked with actionable guidance.
+
+Virtual precheck requirements:
+- ws-bridge connected (port `9877`)
+- `robot_kinematic_viewer.html` connected
+- robot `.glb` model loaded
+
+When viewer is not ready but you still want local-state simulation only, add:
+
+```
+allow_local_only:true
+```
+
+Real mode precheck requirements:
+- `safety_confirmed:true` is required before control actions
+- `execute_rapid` is blocked by default (requires `allow_unsafe_rapid:true`)
+- plugin enforces IRB-120 safety policy: joint limits, speed cap, max step, tabletop TCP Z floor estimate
+
+Recommended safe real-mode command format:
+
+```
+abb_robot action:movj mode:real host:127.0.0.1 port:7000 safety_confirmed:true joints:[0,-20,20,0,20,0] speed:12
 ```
 
 The plugin will:
@@ -302,8 +362,20 @@ controller data with available configurations.
 To add a new robot:
 
 1. Create `robots/<robot-id>.json` with robot specifications
-2. Connect to controller - auto-identification will match the config
-3. Or specify `robot_id` parameter explicitly
+2. Put safety policy in the same file under `safety`:
+  - `realSafeSpeedCap`
+  - `realMaxJointDelta`
+  - `tabletopMinTcpZ`
+3. Connect with explicit profile:
+  - `abb_robot action:connect mode:real host:<ip> robot_profile:<robot-id>`
+4. Validate profile availability:
+  - `abb_robot action:list_robots`
+
+Recommended integration contract for new ABB models:
+1. Add JSON profile in `extensions/abb-robot-control/robots/`.
+2. Keep DH and limits aligned with official robot data.
+3. Run connect + get_status + get_joints + movj(small step) smoke test.
+4. Only then enable higher-level workflows (presets/sequences/RAPID).
 
 ## Safety Notes
 
@@ -340,6 +412,11 @@ Generated programs use:
 - Turn motors on with `motors_on`
 - Verify operation mode is AUTO
 - Check for active RAPID programs
+
+**RAPID semantic errors (e.g. `T_ROB1 - MainModule - line X`):**
+- Run `abb_robot_real action:analyze_logs categoryId:0 limit:30`
+- Use `abb_robot_real action:list_tasks` to confirm valid task/module names
+- Re-load corrected RAPID code before start/reset operations
 
 **Joint limits exceeded:**
 - Plugin automatically clamps values to configured limits

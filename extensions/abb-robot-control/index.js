@@ -1,9 +1,11 @@
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BRIDGE_DLL_PATH = path.join(__dirname, "src", "ABBBridge.dll");
+const ROBOTS_DIR = path.join(__dirname, "robots");
 const ABB_PLUGIN_VERSION = "1.0.2";
 
 const state = {
@@ -11,7 +13,54 @@ const state = {
   connected: false,
   host: null,
   port: 7000,
+  robotProfile: "abb-irb-120",
   joints: [0, 0, 0, 0, 0, 0]
+};
+
+const CONTROL_ACTIONS = new Set([
+  "set_joints",
+  "movj",
+  "go_home",
+  "execute_rapid",
+  "motors_on",
+  "motors_off",
+]);
+
+const REAL_MOTION_ACTIONS = new Set([
+  "set_joints",
+  "movj",
+  "go_home",
+]);
+
+const ROBOT_PROFILE_CACHE = new Map();
+const FALLBACK_ROBOT_PROFILES = {
+  "abb-irb-120": {
+    id: "abb-irb-120",
+    manufacturer: "ABB",
+    model: "IRB 120",
+    dof: 6,
+    joints: [
+      { min: -165, max: 165 },
+      { min: -110, max: 110 },
+      { min: -110, max: 70 },
+      { min: -160, max: 160 },
+      { min: -120, max: 120 },
+      { min: -400, max: 400 },
+    ],
+    dhParameters: [
+      { d: 0.290, thetaOffsetDeg: 0, a: 0.000, alphaDeg: -90 },
+      { d: 0.000, thetaOffsetDeg: -90, a: 0.270, alphaDeg: 0 },
+      { d: 0.000, thetaOffsetDeg: 0, a: 0.070, alphaDeg: -90 },
+      { d: 0.302, thetaOffsetDeg: 0, a: 0.000, alphaDeg: 90 },
+      { d: 0.000, thetaOffsetDeg: 0, a: 0.000, alphaDeg: -90 },
+      { d: 0.072, thetaOffsetDeg: 0, a: 0.000, alphaDeg: 0 },
+    ],
+    safety: {
+      realSafeSpeedCap: 25,
+      realMaxJointDelta: 35,
+      tabletopMinTcpZ: 0.12,
+    },
+  },
 };
 
 // ── WebSocket client for virtual viewer communication ────────────────────────
@@ -22,6 +71,60 @@ const wsReplyQueue = [];
 const WS_BRIDGE_DEFAULT_PORT = 9877;
 const WS_INSTANCE_ID = `abb-plugin-${Date.now().toString(36)}`;
 
+function normalizeRobotProfileId(value) {
+  const id = String(value ?? "").trim().toLowerCase();
+  return id || "abb-irb-120";
+}
+
+function listRobotProfiles() {
+  const ids = new Set(Object.keys(FALLBACK_ROBOT_PROFILES));
+  try {
+    if (fs.existsSync(ROBOTS_DIR)) {
+      for (const name of fs.readdirSync(ROBOTS_DIR)) {
+        if (name.toLowerCase().endsWith(".json")) {
+          ids.add(name.replace(/\.json$/i, "").toLowerCase());
+        }
+      }
+    }
+  } catch {}
+  return Array.from(ids).sort();
+}
+
+function getRobotProfile(profileIdInput) {
+  const profileId = normalizeRobotProfileId(profileIdInput);
+  if (ROBOT_PROFILE_CACHE.has(profileId)) {
+    return ROBOT_PROFILE_CACHE.get(profileId);
+  }
+
+  const fallback = FALLBACK_ROBOT_PROFILES[profileId];
+  let loaded = fallback ? JSON.parse(JSON.stringify(fallback)) : null;
+
+  try {
+    const filePath = path.join(ROBOTS_DIR, `${profileId}.json`);
+    if (fs.existsSync(filePath)) {
+      const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+      loaded = parsed;
+    }
+  } catch {}
+
+  if (!loaded || !Array.isArray(loaded.joints) || loaded.joints.length < 6) {
+    loaded = JSON.parse(JSON.stringify(FALLBACK_ROBOT_PROFILES["abb-irb-120"]));
+  }
+
+  if (!Array.isArray(loaded.dhParameters) || loaded.dhParameters.length < 6) {
+    loaded.dhParameters = FALLBACK_ROBOT_PROFILES["abb-irb-120"].dhParameters;
+  }
+
+  loaded.id = normalizeRobotProfileId(loaded.id ?? profileId);
+  loaded.safety = {
+    ...FALLBACK_ROBOT_PROFILES["abb-irb-120"].safety,
+    ...(loaded.safety ?? {}),
+  };
+
+  ROBOT_PROFILE_CACHE.set(profileId, loaded);
+  return loaded;
+}
+
 async function loadWsModule() {
   try {
     const mod = await import("ws");
@@ -31,7 +134,7 @@ async function loadWsModule() {
   }
 }
 
-async function wsConnect(wsPort) {
+async function wsConnect(wsPort, robotProfileId = state.robotProfile) {
   if (wsConn && wsConn.readyState <= 1) {
     return wsConn;
   }
@@ -54,7 +157,11 @@ async function wsConnect(wsPort) {
         clearTimeout(timeout);
         wsConn = ws;
         wsRegistered = false;
-        ws.send(JSON.stringify({ cmd: "register", robotId: "abb-crb-15000", instanceId: WS_INSTANCE_ID }));
+        ws.send(JSON.stringify({
+          cmd: "register",
+          robotId: normalizeRobotProfileId(robotProfileId),
+          instanceId: WS_INSTANCE_ID
+        }));
       };
 
       ws.onmessage = (event) => {
@@ -132,6 +239,215 @@ function wsDisconnect() {
     wsConn = null;
   }
   wsRegistered = false;
+}
+
+function degToRad(v) {
+  return v * Math.PI / 180;
+}
+
+function mm(v) {
+  return `${(v * 1000).toFixed(1)}mm`;
+}
+
+function matMul4(a, b) {
+  const out = new Array(16).fill(0);
+  for (let r = 0; r < 4; r++) {
+    for (let c = 0; c < 4; c++) {
+      out[r * 4 + c] =
+        a[r * 4 + 0] * b[0 * 4 + c] +
+        a[r * 4 + 1] * b[1 * 4 + c] +
+        a[r * 4 + 2] * b[2 * 4 + c] +
+        a[r * 4 + 3] * b[3 * 4 + c];
+    }
+  }
+  return out;
+}
+
+function dhMatrix(theta, d, a, alpha) {
+  const ct = Math.cos(theta), st = Math.sin(theta);
+  const ca = Math.cos(alpha), sa = Math.sin(alpha);
+  return [
+    ct, -st * ca, st * sa, a * ct,
+    st, ct * ca, -ct * sa, a * st,
+    0, sa, ca, d,
+    0, 0, 0, 1,
+  ];
+}
+
+function estimateTcpZ(jointsDeg, profile) {
+  if (!Array.isArray(jointsDeg) || jointsDeg.length < 6) return null;
+  const dh = Array.isArray(profile?.dhParameters) ? profile.dhParameters : [];
+  if (dh.length < 6) return null;
+  let t = [
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    0, 0, 0, 1,
+  ];
+  for (let i = 0; i < 6; i++) {
+    const j = Number(jointsDeg[i] ?? 0);
+    const p = dh[i];
+    const theta = degToRad(j + p.thetaOffsetDeg);
+    const alpha = degToRad(p.alphaDeg);
+    t = matMul4(t, dhMatrix(theta, p.d, p.a, alpha));
+  }
+  return t[11];
+}
+
+function validateRealJointTargets(targetJoints, currentJoints, speed, profile) {
+  const issues = [];
+  const limits = Array.isArray(profile?.joints) ? profile.joints : [];
+  const caps = {
+    realSafeSpeedCap: Number(profile?.safety?.realSafeSpeedCap ?? 25),
+    realMaxJointDelta: Number(profile?.safety?.realMaxJointDelta ?? 35),
+    tabletopMinTcpZ: Number(profile?.safety?.tabletopMinTcpZ ?? 0.12),
+  };
+
+  for (let i = 0; i < 6; i++) {
+    const v = Number(targetJoints[i] ?? 0);
+    const lim = limits[i] ?? { min: -180, max: 180 };
+    if (v < lim.min || v > lim.max) {
+      issues.push(`J${i + 1} out of limit: ${v.toFixed(2)} (allowed ${lim.min}..${lim.max})`);
+    }
+  }
+
+  const safeSpeed = Number(speed ?? 0);
+  if (safeSpeed > caps.realSafeSpeedCap) {
+    issues.push(`speed too high for safe mode: ${safeSpeed} (max ${caps.realSafeSpeedCap})`);
+  }
+
+  if (Array.isArray(currentJoints) && currentJoints.length >= 6) {
+    for (let i = 0; i < 6; i++) {
+      const delta = Math.abs(Number(targetJoints[i] ?? 0) - Number(currentJoints[i] ?? 0));
+      if (delta > caps.realMaxJointDelta) {
+        issues.push(`J${i + 1} step too large: ${delta.toFixed(2)}deg (max ${caps.realMaxJointDelta}deg)`);
+      }
+    }
+  }
+
+  const z = estimateTcpZ(targetJoints, profile);
+  if (typeof z === "number" && z < caps.tabletopMinTcpZ) {
+    issues.push(`estimated TCP Z too low: ${mm(z)} (min ${mm(caps.tabletopMinTcpZ)})`);
+  }
+  return { ok: issues.length === 0, issues, estimatedTcpZ: z };
+}
+
+function isViewerConnected() {
+  return !!(wsConn && wsConn.readyState === 1);
+}
+
+async function getViewerInfoSafe() {
+  if (!isViewerConnected()) return null;
+  try {
+    const reply = JSON.parse(await wsSendAndWait({ cmd: "get_info" }, 4000));
+    return reply;
+  } catch {
+    return null;
+  }
+}
+
+async function preflightControl(action, requestedMode, params) {
+  if (!CONTROL_ACTIONS.has(action)) {
+    return null;
+  }
+
+  const expectedMode = requestedMode === "auto" ? (state.mode || "virtual") : requestedMode;
+  if (!state.connected) {
+    return asTextResult(
+      `Control precheck: robot is not connected.\n` +
+      `  Requested action: ${action}\n` +
+      `  Target mode: ${expectedMode}\n\n` +
+      `Please prepare and confirm environment first, then connect before control:\n` +
+      `  Virtual/Simulation (viewer): abb_robot action:connect mode:virtual port:9877\n` +
+      `  Real robot / ABB RobotStudio: abb_robot action:connect mode:real host:<controller-ip> port:7000`,
+      {
+        success: false,
+        precheck: true,
+        environmentReady: false,
+        connected: false,
+        targetMode: expectedMode,
+        next: "connect",
+      }
+    );
+  }
+
+  if (state.mode === "virtual") {
+    const wsOk = isViewerConnected();
+    const allowLocalOnly = params.allow_local_only === true;
+    const info = await getViewerInfoSafe();
+    const hasModel = info && info.hasModel === true;
+
+    if (!wsOk && !allowLocalOnly) {
+      return asTextResult(
+        `Control precheck: connected mode is virtual, but viewer bridge is not connected.\n` +
+        `No visible robot motion will occur.\n\n` +
+        `Prepare environment and retry:\n` +
+        `  1) Start ws-bridge on port 9877\n` +
+        `  2) Open robot_kinematic_viewer.html and click Connect\n` +
+        `  3) Load robot model (.glb)\n` +
+        `If you only want local-state simulation, add allow_local_only:true.`,
+        {
+          success: false,
+          precheck: true,
+          connected: true,
+          mode: "virtual",
+          wsConnected: false,
+          hasModel: false,
+          environmentReady: false,
+        }
+      );
+    }
+
+    if (wsOk && !hasModel) {
+      return asTextResult(
+        `Control precheck: viewer is connected but robot model is not loaded.\n` +
+        `Please load a .glb model in robot_kinematic_viewer.html, then retry control.`,
+        {
+          success: false,
+          precheck: true,
+          connected: true,
+          mode: "virtual",
+          wsConnected: true,
+          hasModel: false,
+          environmentReady: false,
+        }
+      );
+    }
+  }
+
+  if (state.mode === "real" && CONTROL_ACTIONS.has(action)) {
+    if (params.safety_confirmed !== true) {
+      return asTextResult(
+        `Control precheck: real robot mode requires explicit safety confirmation before motion.\n` +
+        `Please verify environment is safe (tabletop, clearance, no human in workspace), then retry with:\n` +
+        `  safety_confirmed:true`,
+        {
+          success: false,
+          precheck: true,
+          connected: true,
+          mode: "real",
+          environmentReady: false,
+          requires: "safety_confirmed:true",
+        }
+      );
+    }
+
+    if (action === "execute_rapid" && params.allow_unsafe_rapid !== true) {
+      return asTextResult(
+        `Control precheck: execute_rapid is blocked by default in safe mode.\n` +
+        `Use set_joints/movj with safety guards, or if fully reviewed add allow_unsafe_rapid:true.`,
+        {
+          success: false,
+          precheck: true,
+          connected: true,
+          mode: "real",
+          blockedAction: "execute_rapid",
+        }
+      );
+    }
+  }
+
+  return null;
 }
 
 function asTextResult(text, details = {}) {
@@ -238,7 +554,7 @@ if (-not $connectResult.success) {
   exit 0
 }
 $payloadJson = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${payloadB64}'))
-$payload = if ([string]::IsNullOrWhiteSpace($payloadJson)) { @{} } else { ConvertFrom-Json -InputObject $payloadJson -AsHashtable }
+$payload = if ([string]::IsNullOrWhiteSpace($payloadJson)) { @{} } else { ConvertFrom-Json -InputObject $payloadJson }
 $result = $bridge.${method}($payload).GetAwaiter().GetResult()
 $bridge.Disconnect(@{}).GetAwaiter().GetResult() | Out-Null
 $result | ConvertTo-Json -Depth 20 -Compress
@@ -259,18 +575,21 @@ $result | ConvertTo-Json -Depth 20 -Compress
 async function executeVirtual(action, params) {
   switch (action) {
     case "connect": {
+      const requestedProfile = normalizeRobotProfileId(params.robot_profile ?? params.robot_id ?? state.robotProfile);
+      state.robotProfile = getRobotProfile(requestedProfile).id;
       state.mode = "virtual";
       state.host = String(params.host ?? "virtual-controller");
       state.port = Number(params.port ?? WS_BRIDGE_DEFAULT_PORT);
 
       // Try to connect to the WebSocket bridge for viewer communication
       try {
-        await wsConnect(state.port);
+        await wsConnect(state.port, state.robotProfile);
         state.connected = true;
         return asTextResult(
           `Virtual robot connected via WebSocket bridge (ws://127.0.0.1:${state.port}).\n` +
-          `The 3D viewer will now respond to motion commands.`,
-          { mode: "virtual", connected: true, host: state.host, port: state.port, wsConnected: true }
+          `The 3D viewer will now respond to motion commands.\n` +
+          `Profile: ${state.robotProfile}`,
+          { mode: "virtual", connected: true, host: state.host, port: state.port, wsConnected: true, robotProfile: state.robotProfile }
         );
       } catch (wsErr) {
         // Fallback: still mark as connected for local state tracking
@@ -278,8 +597,9 @@ async function executeVirtual(action, params) {
         return asTextResult(
           `Virtual robot connected (local mode). WebSocket bridge not available: ${wsErr.message}\n` +
           `Tip: Start the bridge with 'node --import tsx models/Plugin/src/ws-bridge.ts' ` +
-          `and open robot_kinematic_viewer.html to enable 3D visualization.`,
-          { mode: "virtual", connected: true, host: state.host, port: state.port, wsConnected: false }
+          `and open robot_kinematic_viewer.html to enable 3D visualization.\n` +
+          `Profile: ${state.robotProfile}`,
+          { mode: "virtual", connected: true, host: state.host, port: state.port, wsConnected: false, robotProfile: state.robotProfile }
         );
       }
     }
@@ -377,6 +697,13 @@ async function executeVirtual(action, params) {
           const replyText = await wsSendAndWait(wsMsg, 15000);
           const reply = JSON.parse(replyText);
 
+          if (String(reply.cmd ?? "") === "error") {
+            throw new Error(`viewer movj failed: ${String(reply.error ?? "unknown error")}`);
+          }
+          if (String(reply.cmd ?? "") !== "movj_done") {
+            throw new Error(`unexpected viewer reply: ${String(reply.cmd ?? "(missing)")}`);
+          }
+
           state.joints = Array.isArray(reply.joints) ? reply.joints : targetJoints;
 
           const cancelled = reply.cancelled ? " (cancelled by new command)" : "";
@@ -448,9 +775,10 @@ async function executeVirtual(action, params) {
       });
     }
     case "list_robots": {
+      const profiles = listRobotProfiles();
       return asTextResult(
-        "Available robot configurations:\n  • abb-crb-15000 — ABB CRB-15000 (6 DOF)",
-        { mode: "virtual", robots: ["abb-crb-15000"] }
+        `Available robot configurations:\n  ${profiles.map((id) => `• ${id}`).join("\n")}`,
+        { mode: "virtual", robots: profiles, activeProfile: state.robotProfile }
       );
     }
     default:
@@ -464,6 +792,8 @@ async function executeReal(action, params) {
   if (action === "connect") {
     const host = String(params.host ?? "").trim();
     const port = Number(params.port ?? 7000);
+    const requestedProfile = normalizeRobotProfileId(params.robot_profile ?? params.robot_id ?? state.robotProfile);
+    state.robotProfile = getRobotProfile(requestedProfile).id;
     if (!host) {
       return asTextResult("Real mode connect requires host.", { success: false, mode: "real" });
     }
@@ -478,6 +808,7 @@ async function executeReal(action, params) {
         connected: true,
         host,
         port,
+        robotProfile: state.robotProfile,
         status: result
       });
     }
@@ -521,13 +852,25 @@ async function executeReal(action, params) {
       });
     }
     case "set_joints": {
+      const profile = getRobotProfile(state.robotProfile);
+      const speedCap = Number(profile?.safety?.realSafeSpeedCap ?? 25);
       const joints = Array.isArray(params.joints) ? params.joints.map((x) => Number(x) || 0).slice(0, 6) : null;
       if (!joints) {
         return asTextResult("Real set_joints requires joints array.", { success: false, mode: "real" });
       }
+      const safeSpeed = Math.max(1, Math.min(speedCap, Number(params.speed ?? 20) || 20));
+      const current = await invokeBridgeSequence("GetJointPositions", {}, state.host, state.port);
+      const currentJoints = Array.isArray(current.joints) ? current.joints : null;
+      const check = validateRealJointTargets(joints, currentJoints, safeSpeed, profile);
+      if (!check.ok) {
+        return asTextResult(
+          `Real set_joints blocked by safety policy:\n  - ${check.issues.join("\n  - ")}`,
+          { success: false, mode: "real", blockedBySafety: true, issues: check.issues, estimatedTcpZ: check.estimatedTcpZ }
+        );
+      }
       const result = await invokeBridgeSequence("MoveToJoints", {
         joints,
-        speed: Number(params.speed ?? 100),
+        speed: safeSpeed,
         zone: String(params.zone ?? "fine")
       }, state.host, state.port);
       return asTextResult(result.success ? "Real set_joints executed." : `Real set_joints failed: ${result.error ?? "unknown"}`, {
@@ -537,13 +880,25 @@ async function executeReal(action, params) {
       });
     }
     case "movj": {
+      const profile = getRobotProfile(state.robotProfile);
+      const speedCap = Number(profile?.safety?.realSafeSpeedCap ?? 25);
       const joints = Array.isArray(params.joints) ? params.joints.map((x) => Number(x) || 0).slice(0, 6) : null;
       if (!joints) {
         return asTextResult("Real movj requires joints array.", { success: false, mode: "real" });
       }
+      const safeSpeed = Math.max(1, Math.min(speedCap, Number(params.speed ?? 15) || 15));
+      const current = await invokeBridgeSequence("GetJointPositions", {}, state.host, state.port);
+      const currentJoints = Array.isArray(current.joints) ? current.joints : null;
+      const check = validateRealJointTargets(joints, currentJoints, safeSpeed, profile);
+      if (!check.ok) {
+        return asTextResult(
+          `Real movj blocked by safety policy:\n  - ${check.issues.join("\n  - ")}`,
+          { success: false, mode: "real", blockedBySafety: true, issues: check.issues, estimatedTcpZ: check.estimatedTcpZ }
+        );
+      }
       const result = await invokeBridgeSequence("MoveToJoints", {
         joints,
-        speed: Number(params.speed ?? 45),
+        speed: safeSpeed,
         zone: String(params.zone ?? "fine")
       }, state.host, state.port);
       return asTextResult(result.success ? "Real movj executed." : `Real movj failed: ${result.error ?? "unknown"}`, {
@@ -568,10 +923,22 @@ async function executeReal(action, params) {
       });
     }
     case "go_home": {
+      const profile = getRobotProfile(state.robotProfile);
+      const speedCap = Number(profile?.safety?.realSafeSpeedCap ?? 25);
       const homeJoints = [0, 0, 0, 0, 0, 0];
+      const safeSpeed = Math.max(1, Math.min(speedCap, Number(params.speed ?? 12) || 12));
+      const current = await invokeBridgeSequence("GetJointPositions", {}, state.host, state.port);
+      const currentJoints = Array.isArray(current.joints) ? current.joints : null;
+      const check = validateRealJointTargets(homeJoints, currentJoints, safeSpeed, profile);
+      if (!check.ok) {
+        return asTextResult(
+          `Real go_home blocked by safety policy:\n  - ${check.issues.join("\n  - ")}`,
+          { success: false, mode: "real", blockedBySafety: true, issues: check.issues, estimatedTcpZ: check.estimatedTcpZ }
+        );
+      }
       const result = await invokeBridgeSequence("MoveToJoints", {
         joints: homeJoints,
-        speed: Number(params.speed ?? 100),
+        speed: safeSpeed,
         zone: "fine"
       }, state.host, state.port);
       if (result.success) state.joints = homeJoints;
@@ -596,9 +963,10 @@ async function executeReal(action, params) {
       );
     }
     case "list_robots": {
+      const profiles = listRobotProfiles();
       return asTextResult(
-        "Available robot configurations:\n  • abb-crb-15000 — ABB CRB-15000 (6 DOF)",
-        { mode: "real", robots: ["abb-crb-15000"] }
+        `Available robot configurations:\n  ${profiles.map((id) => `• ${id}`).join("\n")}`,
+        { mode: "real", robots: profiles, activeProfile: state.robotProfile }
       );
     }
     default:
@@ -620,6 +988,7 @@ const plugin = {
     properties: {
       controllerHost: { type: "string", description: "ABB controller IP or hostname (real mode)" },
       controllerPort: { type: "number", minimum: 1, maximum: 65535, description: "Controller port (real mode, default: 7000)" },
+      defaultRobot: { type: "string", description: "Default robot profile id (e.g. abb-irb-120)" },
       defaultMode: { type: "string", enum: ["virtual", "real", "auto"], description: "Default mode (default: auto)" },
       wsBridgePort: { type: "number", minimum: 1, maximum: 65535, description: "WebSocket bridge port for virtual mode (default: 9877)" }
     }
@@ -647,9 +1016,14 @@ const plugin = {
           mode: { type: "string", enum: ["virtual", "real", "auto"], description: "Operation mode (default: auto)" },
           host: { type: "string", description: "Controller host (real) or bridge host (virtual)" },
           port: { type: "number", description: "Controller port (real: 7000) or bridge port (virtual: 9877)" },
+          robot_id: { type: "string", description: "Robot profile id (legacy alias)" },
+          robot_profile: { type: "string", description: "Robot profile id for safety limits/DH (e.g. abb-irb-120)" },
           joints: { type: "array", items: { type: "number" }, description: "Target joint angles in degrees [J1..J6]" },
           start_joints: { type: "array", items: { type: "number" }, description: "Optional start joint angles for movj" },
           speed: { type: "number", description: "Motion speed percentage 1-100 (default: 45 for movj, 100 for set_joints)" },
+          allow_local_only: { type: "boolean", description: "Allow local-only virtual simulation when viewer bridge/model is not ready" },
+          safety_confirmed: { type: "boolean", description: "Required true for real robot control actions" },
+          allow_unsafe_rapid: { type: "boolean", description: "Allow execute_rapid in real mode (unsafe, default false)" },
           zone: { type: "string", description: "Zone parameter for real mode (fine/z10/blended)" },
           code: { type: "string", description: "RAPID program code" },
           rapid_code: { type: "string", description: "RAPID program code (alias)" },
@@ -673,32 +1047,71 @@ const plugin = {
         }
 
         const requestedMode = String(params?.mode ?? config?.defaultMode ?? "auto").toLowerCase();
-        const effectiveMode = requestedMode === "auto" ? (state.mode || "virtual") : requestedMode;
+
+        if (!params.robot_profile && !params.robot_id && config?.defaultRobot) {
+          params.robot_profile = config.defaultRobot;
+        }
+
+        const precheck = await preflightControl(action, requestedMode, params);
+        if (precheck) {
+          return precheck;
+        }
 
         if (action === "connect") {
-          if (!params.host && config?.controllerHost) {
-            params.host = config.controllerHost;
-          }
-          if (!params.port && config?.controllerPort) {
-            params.port = config.controllerPort;
-          }
-          // Pass wsBridgePort config to virtual mode
-          if (!params.port && config?.wsBridgePort) {
-            params.port = config.wsBridgePort;
+          if (requestedMode === "virtual") {
+            // Virtual mode should prefer WebSocket bridge port (9877), not controllerPort.
+            if (!params.port) {
+              params.port = config?.wsBridgePort ?? WS_BRIDGE_DEFAULT_PORT;
+            }
+            if (!params.host) {
+              params.host = "127.0.0.1";
+            }
+          } else if (requestedMode === "real") {
+            if (!params.host && config?.controllerHost) {
+              params.host = config.controllerHost;
+            }
+            if (!params.port && config?.controllerPort) {
+              params.port = config.controllerPort;
+            }
+          } else {
+            // Auto mode: keep real defaults for first attempt, then virtual fallback will set bridge defaults.
+            if (!params.host && config?.controllerHost) {
+              params.host = config.controllerHost;
+            }
+            if (!params.port && config?.controllerPort) {
+              params.port = config.controllerPort;
+            }
           }
         }
 
         try {
-          if (effectiveMode === "real") {
+          if (requestedMode === "auto") {
+            // Connect in auto: try real first, then fall back to virtual bridge mode.
+            if (action === "connect") {
+              try {
+                const realResult = await executeReal(action, params);
+                if (realResult?.details?.connected) return realResult;
+              } catch {}
+
+              const vParams = { ...params };
+              if (!vParams.port) vParams.port = config?.wsBridgePort ?? WS_BRIDGE_DEFAULT_PORT;
+              if (!vParams.host) vParams.host = "127.0.0.1";
+              return await executeVirtual(action, vParams);
+            }
+
+            // Non-connect actions in auto should follow current state mode.
+            if (state.mode === "real") {
+              return await executeReal(action, params);
+            }
+            return await executeVirtual(action, params);
+          }
+
+          if (requestedMode === "real") {
             return await executeReal(action, params);
           }
 
-          if (requestedMode === "auto") {
-            try {
-              return await executeReal(action, params);
-            } catch {
-              return await executeVirtual(action, params);
-            }
+          if (requestedMode === "virtual") {
+            return await executeVirtual(action, params);
           }
 
           return await executeVirtual(action, params);
@@ -706,7 +1119,7 @@ const plugin = {
           return asTextResult(`abb_robot failed: ${String(err?.message ?? err)}`, {
             success: false,
             action,
-            mode: effectiveMode
+            mode: requestedMode
           });
         }
       }
