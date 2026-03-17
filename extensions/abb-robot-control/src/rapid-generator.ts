@@ -38,12 +38,18 @@ export interface TrajectoryPoint {
  * RAPID Code Generator
  */
 export class RAPIDGenerator {
+  private static formatSpeedData(speed: number): string {
+    const tcp = Math.max(1, Math.min(7000, Number(speed) || 100));
+    const tcpText = tcp.toFixed(3).replace(/\.0+$/, "").replace(/(\.\d*?)0+$/, "$1");
+    return `[${tcpText},500,5000,1000]`;
+  }
+
   /**
    * Generate RAPID code for single joint movement
    */
   static generateMoveJoint(joints: number[], speed: number = 100, zone: string = "fine"): string {
     const jointsStr = joints.map(j => j.toFixed(2)).join(", ");
-    const speedStr = `v${Math.round(speed)}`;
+    const speedStr = this.formatSpeedData(speed);
 
     return `MODULE MainModule
   PROC main()
@@ -60,7 +66,7 @@ ENDMODULE`;
     const { x, y, z, q1, q2, q3, q4 } = target;
     const speed = target.speed || 100;
     const zone = target.zone || "fine";
-    const speedStr = `v${Math.round(speed)}`;
+    const speedStr = this.formatSpeedData(speed);
 
     return `MODULE MainModule
   CONST robtarget pTarget := [[${x}, ${y}, ${z}], [${q1}, ${q2}, ${q3}, ${q4}], [0, 0, 0, 0], [9E9, 9E9, 9E9, 9E9, 9E9, 9E9]];
@@ -79,7 +85,7 @@ ENDMODULE`;
     const { via, to } = circular;
     const speed = circular.speed || 100;
     const zone = circular.zone || "fine";
-    const speedStr = `v${Math.round(speed)}`;
+    const speedStr = this.formatSpeedData(speed);
 
     return `MODULE MainModule
   CONST robtarget pVia := [[${via.x}, ${via.y}, ${via.z}], [${via.q1}, ${via.q2}, ${via.q3}, ${via.q4}], [0, 0, 0, 0], [9E9, 9E9, 9E9, 9E9, 9E9, 9E9]];
@@ -107,7 +113,7 @@ ENDMODULE`;
         const zone = target.zone || (index === points.length - 1 ? "fine" : "z10");
         
         declarations.push(`  CONST jointtarget jTarget${index} := [[${jointsStr}], [9E9, 9E9, 9E9, 9E9, 9E9, 9E9]];`);
-        movements.push(`    MoveAbsJ jTarget${index}, v${Math.round(speed)}, ${zone}, tool0;`);
+        movements.push(`    MoveAbsJ jTarget${index}, ${this.formatSpeedData(speed)}, ${zone}, tool0;`);
       } else if (point.type === "linear") {
         const target = point.target as CartesianTarget;
         const { x, y, z, q1, q2, q3, q4 } = target;
@@ -115,7 +121,7 @@ ENDMODULE`;
         const zone = target.zone || (index === points.length - 1 ? "fine" : "z10");
         
         declarations.push(`  CONST robtarget pTarget${index} := [[${x}, ${y}, ${z}], [${q1}, ${q2}, ${q3}, ${q4}], [0, 0, 0, 0], [9E9, 9E9, 9E9, 9E9, 9E9, 9E9]];`);
-        movements.push(`    MoveL pTarget${index}, v${Math.round(speed)}, ${zone}, tool0;`);
+        movements.push(`    MoveL pTarget${index}, ${this.formatSpeedData(speed)}, ${zone}, tool0;`);
       } else if (point.type === "circular") {
         const circular = point.target as CircularTarget;
         const { via, to } = circular;
@@ -124,7 +130,7 @@ ENDMODULE`;
         
         declarations.push(`  CONST robtarget pVia${index} := [[${via.x}, ${via.y}, ${via.z}], [${via.q1}, ${via.q2}, ${via.q3}, ${via.q4}], [0, 0, 0, 0], [9E9, 9E9, 9E9, 9E9, 9E9, 9E9]];`);
         declarations.push(`  CONST robtarget pTo${index} := [[${to.x}, ${to.y}, ${to.z}], [${to.q1}, ${to.q2}, ${to.q3}, ${to.q4}], [0, 0, 0, 0], [9E9, 9E9, 9E9, 9E9, 9E9, 9E9]];`);
-        movements.push(`    MoveC pVia${index}, pTo${index}, v${Math.round(speed)}, ${zone}, tool0;`);
+        movements.push(`    MoveC pVia${index}, pTo${index}, ${this.formatSpeedData(speed)}, ${zone}, tool0;`);
       }
     });
 
@@ -150,6 +156,9 @@ ENDMODULE`;
     const pickApproach = { ...pickPos, z: pickPos.z + approachOffset };
     const placeApproach = { ...placePos, z: placePos.z + approachOffset };
 
+    const travelSpeedData = this.formatSpeedData(speed);
+    const approachSpeedData = this.formatSpeedData(speed / 2);
+
     return `MODULE PickAndPlace
   CONST robtarget pPickApproach := [[${pickApproach.x}, ${pickApproach.y}, ${pickApproach.z}], [${pickApproach.q1}, ${pickApproach.q2}, ${pickApproach.q3}, ${pickApproach.q4}], [0, 0, 0, 0], [9E9, 9E9, 9E9, 9E9, 9E9, 9E9]];
   CONST robtarget pPick := [[${pickPos.x}, ${pickPos.y}, ${pickPos.z}], [${pickPos.q1}, ${pickPos.q2}, ${pickPos.q3}, ${pickPos.q4}], [0, 0, 0, 0], [9E9, 9E9, 9E9, 9E9, 9E9, 9E9]];
@@ -158,16 +167,16 @@ ENDMODULE`;
   
   PROC main()
     ! Pick and place operation
-    MoveL pPickApproach, v${Math.round(speed)}, z10, tool0;
-    MoveL pPick, v${Math.round(speed / 2)}, fine, tool0;
+    MoveL pPickApproach, ${travelSpeedData}, z10, tool0;
+    MoveL pPick, ${approachSpeedData}, fine, tool0;
     ! Close gripper here
     WaitTime 0.5;
-    MoveL pPickApproach, v${Math.round(speed)}, z10, tool0;
-    MoveL pPlaceApproach, v${Math.round(speed)}, z10, tool0;
-    MoveL pPlace, v${Math.round(speed / 2)}, fine, tool0;
+    MoveL pPickApproach, ${travelSpeedData}, z10, tool0;
+    MoveL pPlaceApproach, ${travelSpeedData}, z10, tool0;
+    MoveL pPlace, ${approachSpeedData}, fine, tool0;
     ! Open gripper here
     WaitTime 0.5;
-    MoveL pPlaceApproach, v${Math.round(speed)}, z10, tool0;
+    MoveL pPlaceApproach, ${travelSpeedData}, z10, tool0;
   ENDPROC
 ENDMODULE`;
   }
@@ -184,6 +193,10 @@ ENDMODULE`;
     const approachStart = { ...startPos, z: startPos.z + 50 };
     const approachEnd = { ...endPos, z: endPos.z + 50 };
 
+    const travelSpeedData = this.formatSpeedData(travelSpeed);
+    const halfTravelSpeedData = this.formatSpeedData(travelSpeed / 2);
+    const weldSpeedData = this.formatSpeedData(weldSpeed);
+
     return `MODULE Welding
   CONST robtarget pApproachStart := [[${approachStart.x}, ${approachStart.y}, ${approachStart.z}], [${approachStart.q1}, ${approachStart.q2}, ${approachStart.q3}, ${approachStart.q4}], [0, 0, 0, 0], [9E9, 9E9, 9E9, 9E9, 9E9, 9E9]];
   CONST robtarget pWeldStart := [[${startPos.x}, ${startPos.y}, ${startPos.z}], [${startPos.q1}, ${startPos.q2}, ${startPos.q3}, ${startPos.q4}], [0, 0, 0, 0], [9E9, 9E9, 9E9, 9E9, 9E9, 9E9]];
@@ -192,14 +205,14 @@ ENDMODULE`;
   
   PROC main()
     ! Welding path
-    MoveL pApproachStart, v${Math.round(travelSpeed)}, z10, tool0;
-    MoveL pWeldStart, v${Math.round(travelSpeed / 2)}, fine, tool0;
+    MoveL pApproachStart, ${travelSpeedData}, z10, tool0;
+    MoveL pWeldStart, ${halfTravelSpeedData}, fine, tool0;
     ! Start welding
     SetDO doWeldOn, 1;
-    MoveL pWeldEnd, v${Math.round(weldSpeed)}, fine, tool0;
+    MoveL pWeldEnd, ${weldSpeedData}, fine, tool0;
     ! Stop welding
     SetDO doWeldOn, 0;
-    MoveL pApproachEnd, v${Math.round(travelSpeed)}, z10, tool0;
+    MoveL pApproachEnd, ${travelSpeedData}, z10, tool0;
   ENDPROC
 ENDMODULE`;
   }
@@ -227,7 +240,7 @@ ENDMODULE`;
           const z = basePos.z + layer * spacing.z;
           
           declarations.push(`  CONST robtarget pPallet${index} := [[${x}, ${y}, ${z}], [${basePos.q1}, ${basePos.q2}, ${basePos.q3}, ${basePos.q4}], [0, 0, 0, 0], [9E9, 9E9, 9E9, 9E9, 9E9, 9E9]];`);
-          movements.push(`    MoveL pPallet${index}, v${Math.round(speed)}, z10, tool0;`);
+          movements.push(`    MoveL pPallet${index}, ${this.formatSpeedData(speed)}, z10, tool0;`);
           movements.push(`    ! Place object here`);
           movements.push(`    WaitTime 0.5;`);
           

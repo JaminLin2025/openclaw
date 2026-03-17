@@ -1,48 +1,51 @@
 ---
 name: abb-robot-real-control
-description: Independent real ABB plugin usage. Use when user wants scan, connect, status, motion, RAPID, logs, and module backup on actual ABB controllers.
+description: >
+  Real ABB controller operation skill. Use only for physical robot or RobotStudio
+  controller control. Enforces explicit host targeting, status verification, and
+  safety-confirmed motion.
 ---
 
-# ABB Real Plugin Skill
+# ABB Real Control Skill
 
 Use tool `abb_robot_real` only.
 
-## Discovery and Connection
-- Scan: `abb_robot_real action:scan_controllers`
-- Connect: `abb_robot_real action:connect host:127.0.0.1 port:7000`
-- Status: `abb_robot_real action:get_status`
+## Execution Sequence (Strict)
 
-## FormMain-Equivalent Actions
-- System info: `abb_robot_real action:get_system_info`
-- Service info: `abb_robot_real action:get_service_info`
-- Get speed: `abb_robot_real action:get_speed`
-- Set speed: `abb_robot_real action:set_speed speed:30`
-- Get joints: `abb_robot_real action:get_joints`
-- Get world position: `abb_robot_real action:get_world_position`
-- Event log: `abb_robot_real action:get_event_log categoryId:0 limit:20`
-- Query logs alias: `abb_robot_real action:query_logs categoryId:0 limit:20`
-- Intelligent analysis: `abb_robot_real action:analyze_logs categoryId:0 limit:30`
-- Intelligent analysis with screenshot/error text: `abb_robot_real action:analyze_logs categoryId:0 limit:30 error_hint:"T_ROB1 MainModule 行3 错误"`
-- Backup module: `abb_robot_real action:backup_module moduleName:T_ROB1 outputDir:D:/tmp/abb-backup`
-- Reset pointer: `abb_robot_real action:reset_program_pointer taskName:T_ROB1`
-- Move joints: `abb_robot_real action:movj joints:[0,-20,20,0,20,0] speed:10 zone:fine`
+1. Discover controllers
+`abb_robot_real action:scan_controllers`
 
-## RAPID Control
-- Load RAPID: `abb_robot_real action:load_rapid rapid_code:"..." module_name:MainModule`
-- Start: `abb_robot_real action:start_program allowRealExecution:true`
-- Stop: `abb_robot_real action:stop_program`
+2. Connect to explicit host
+`abb_robot_real action:connect host:<controller-ip> port:7000`
 
-## Safety Notes
-- Start/execute on real robot is blocked unless `allowRealExecution:true`.
-- Always verify workspace safety before motion commands.
+3. Verify state before motion
+`abb_robot_real action:get_status`
 
-## Intelligent Troubleshooting
+4. Run low-speed validation move
+`abb_robot_real action:movj joints:[0,-20,20,0,20,0] speed:10 zone:fine allowRealExecution:true`
 
-When you see errors like `T_ROB1 - MainModule - line X` or semantic errors:
+## Core Operations
 
-1. Run `abb_robot_real action:analyze_logs categoryId:0 limit:30`
-2. Follow recommended actions returned by plugin, typically:
-	- list tasks/modules first
-	- avoid hardcoded `T_ROB1` reset if task/module mismatch
-	- fix RAPID syntax before `start_program`
-3. Re-run `get_status`, `get_event_log`, and then low-speed `movj` validation.
+- System info: `get_system_info`
+- Service info: `get_service_info`
+- Read speed: `get_speed`
+- Set speed: `set_speed speed:30`
+- Read joints: `get_joints`
+- World pose: `get_world_position`
+- Event log: `get_event_log categoryId:0 limit:20`
+- Analyze logs: `analyze_logs categoryId:0 limit:30`
+- Backup module: `backup_module moduleName:<name> outputDir:<path>`
+- Reset pointer: `reset_program_pointer taskName:T_ROB1`
+
+## RAPID Operations
+
+- Load: `load_rapid rapid_code:"..." module_name:MainModule allowRealExecution:true`
+- Start: `start_program allowRealExecution:true`
+- Stop: `stop_program`
+
+## Safety Rules
+
+- Require explicit real-host targeting for all connect operations.
+- Require `allowRealExecution:true` for real execution and RAPID start.
+- Use low speed first for validation.
+- Report exact controller and task errors verbatim; do not mask them.

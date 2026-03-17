@@ -1,8 +1,10 @@
 using System;
 using System.Collections;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using ABB.Robotics.Controllers;
 using ABB.Robotics.Controllers.Discovery;
 using ABB.Robotics.Controllers.EventLogDomain;
@@ -668,6 +670,7 @@ public class ABBBridge
 
             string rapidCode = CoerceString(GetInputValue(input, "code"));
             string moduleName = CoerceString(GetInputValue(input, "moduleName"), "MainModule");
+            rapidCode = NormalizeRapidSpeedSymbols(rapidCode);
 
             await ExecuteRapidProgram(rapidCode, moduleName);
 
@@ -693,6 +696,7 @@ public class ABBBridge
 
             string rapidCode = CoerceString(GetInputValue(input, "code"));
             string moduleName = CoerceString(GetInputValue(input, "moduleName"), "MainModule");
+            rapidCode = NormalizeRapidSpeedSymbols(rapidCode);
 
             bool allowRealExecution = CoerceBool(GetInputValue(input, "allowRealExecution"), false);
             EnsureRapidControlAccess(allowRealExecution);
@@ -810,13 +814,44 @@ public class ABBBridge
     private string GenerateMoveJointsCode(double[] joints, double speed, string zone)
     {
         string jointsStr = string.Join(", ", joints);
-        string speedStr = "v" + (int)speed;
+        string speedStr = FormatSpeedDataLiteral(speed);
 
         return $@"MODULE MainModule
   PROC main()
     MoveAbsJ [[{jointsStr}], [9E9, 9E9, 9E9, 9E9, 9E9, 9E9]], {speedStr}, {zone}, tool0;
   ENDPROC
 ENDMODULE";
+    }
+
+    private static string FormatSpeedDataLiteral(double speed)
+    {
+        // Use an explicit speeddata literal to avoid invalid predefined names like v8/v12.
+        double tcp = Math.Max(1.0, Math.Min(7000.0, speed));
+        string tcpText = tcp.ToString("0.###", CultureInfo.InvariantCulture);
+        return "[" + tcpText + ",500,5000,1000]";
+    }
+
+    private static string NormalizeRapidSpeedSymbols(string rapidCode)
+    {
+        if (string.IsNullOrWhiteSpace(rapidCode))
+        {
+            return rapidCode;
+        }
+
+        // Convert legacy speed symbols like ', v8,' to explicit speeddata literals.
+        return Regex.Replace(
+            rapidCode,
+            @",\s*v(\d+(?:\.\d+)?)\s*,",
+            m =>
+            {
+                if (!double.TryParse(m.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var speed))
+                {
+                    return m.Value;
+                }
+
+                return ", " + FormatSpeedDataLiteral(speed) + ",";
+            },
+            RegexOptions.IgnoreCase);
     }
 
     private static object GetInputValue(dynamic input, string key)
@@ -923,6 +958,7 @@ ENDMODULE";
     /// </summary>
     private async System.Threading.Tasks.Task ExecuteRapidProgram(string rapidCode, string moduleName)
     {
+        rapidCode = NormalizeRapidSpeedSymbols(rapidCode);
         EnsureRapidControlAccess(true);
         var task = controller.Rapid.GetTask("T_ROB1");
         string tempFile = CreateTempRapidFile(rapidCode, moduleName);

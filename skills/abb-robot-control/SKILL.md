@@ -1,11 +1,9 @@
 ---
 name: abb-robot-control
 description: >
-  Control actual ABB robots via PC SDK. Use when the user wants to connect to
-  an ABB robot controller, move a real robot, execute RAPID programs, apply
-  presets, run motion sequences, or query robot status. Supports automatic
-  robot identification based on DH parameters and joint limits. Use for any
-  task involving real ABB robot hardware control.
+  Unified ABB robot control skill for OpenClaw. Use for virtual viewer motion,
+  ABB RobotStudio virtual controller testing, and real ABB controller operations.
+  Enforces explicit mode selection and safety confirmation before physical motion.
 metadata:
   openclaw:
     emoji: "🤖"
@@ -15,516 +13,61 @@ metadata:
 
 # ABB Robot Control Skill
 
-Control actual ABB robots via PC SDK through natural language commands.
+This skill is the execution contract for the `abb_robot` MCP tool.
 
-## Quick Reference
+## Operating Rules
 
-| User Request | Action |
-|---|---|
-| "Connect virtual robot viewer" | `abb_robot` action:`connect` mode:`virtual` port:`9877` |
-| "Connect to robot at 192.168.1.10" | `abb_robot` action:`connect` host:`192.168.1.10` |
-| "Connect IRB-120 profile robot" | `abb_robot` action:`connect` mode:`real` host:`127.0.0.1` robot_profile:`abb-irb-120` |
-| "Disconnect from robot" | `abb_robot` action:`disconnect` |
-| "Move robot to home" | `abb_robot` action:`go_home` |
-| "Set joint 1 to 45 degrees" | `abb_robot` action:`set_joints` joints:`[45,0,0,0,0,0]` |
-| "Smooth move to target" | `abb_robot` action:`movj` joints:`[30,-20,55,15,25,10]` speed:`40` |
-| "Apply ready preset" | `abb_robot` action:`set_preset` preset:`ready` |
-| "Execute wave sequence" | `abb_robot` action:`run_sequence` sequence:`wave_sequence` |
-| "Get current position" | `abb_robot` action:`get_joints` |
-| "Check robot status" | `abb_robot` action:`get_status` |
-| "Query robot logs" | `abb_robot_real` action:`get_event_log` categoryId:`0` limit:`20` |
-| "Analyze robot log errors" | `abb_robot_real` action:`analyze_logs` categoryId:`0` limit:`30` |
-| "Turn motors on" | `abb_robot` action:`motors_on` |
-| "Turn motors off" | `abb_robot` action:`motors_off` |
-| "List available robots" | `abb_robot` action:`list_robots` |
-| "List presets" | `abb_robot` action:`list_presets` |
-| "List sequences" | `abb_robot` action:`list_sequences` |
-| "Identify connected robot" | `abb_robot` action:`identify_robot` |
-| "Load RAPID program" | `abb_robot` action:`load_rapid` rapid_code:`...` |
-| "Start RAPID program" | `abb_robot` action:`start_program` |
-| "Stop RAPID program" | `abb_robot` action:`stop_program` |
-| "Execute RAPID code" | `abb_robot` action:`execute_rapid` rapid_code:`...` |
-| "Make the robot dance" | `abb_robot` action:`dance_template` template:`wave` |
-| "Dance between two poses" | `abb_robot` action:`dance_two_points` point_a:`[...]` point_b:`[...]` |
-| "Show motion history" | `abb_robot` action:`get_motion_memory` |
-| "Clear motion history" | `abb_robot` action:`reset_motion_memory` |
-| "Check plugin version" | `abb_robot` action:`get_version` |
+- For physical robots, always use `mode:real` explicitly.
+- For 3D viewer simulation, always use `mode:virtual` explicitly.
+- Do not rely on `mode:auto` for safety-critical tasks.
+- Before any physical motion command, include `safety_confirmed:true`.
+- Never execute `execute_rapid` on real hardware unless user explicitly asks and confirms risk.
 
-## Prerequisites
+## Minimum Safe Command Patterns
 
-1. **ABB PC SDK 2025** installed on Windows
-2. **ABB robot controller** accessible on network
-3. **Robot configuration file** in `extensions/abb-robot-control/robots/`
-4. **Network connectivity** to robot controller (default port 7000)
+### Real Robot
 
-## Connection
+1. Connect
+`abb_robot action:connect mode:real host:<controller-ip> port:7000`
 
-Before controlling the robot, establish connection:
+2. Check status
+`abb_robot action:get_status mode:real`
 
-```
-User: Connect to the ABB robot at 192.168.125.1
-Tool: abb_robot action:connect host:192.168.125.1
-```
+3. Controlled move
+`abb_robot action:movj mode:real safety_confirmed:true joints:[0,-20,20,0,20,0] speed:10`
 
-Virtual viewer control (recommended when driving `robot_kinematic_viewer.html`):
+### Virtual Viewer
 
-```
-User: Connect to virtual viewer
-Tool: abb_robot action:connect mode:virtual port:9877
-```
+1. Connect bridge session
+`abb_robot action:connect mode:virtual host:127.0.0.1 port:9877`
 
-Notes:
-- For virtual motion, always set `mode:virtual` explicitly.
-- `port:9877` is the WebSocket bridge, not ABB controller port 7000.
-- If you use auto mode while previously connected in real mode, commands may stay in real mode.
+2. Motion
+`abb_robot action:movj mode:virtual joints:[30,-20,55,15,25,10] speed:40`
 
-Real RobotStudio / real robot local test example:
+## Troubleshooting Decision Tree
 
-```
-abb_robot action:connect mode:real host:127.0.0.1 port:7000 robot_profile:abb-irb-120
-```
+1. If user says "real robot did not move":
+Check whether mode was `real` and not virtual fallback.
 
-Bridge reliability behavior:
-- Real mode connect now uses NetScan discovery first, then connects using matched ControllerInfo.
-- Host can be IP / controller ID / SystemId / SystemName.
-- For `127.0.0.1`/`localhost`, the bridge will prefer virtual RobotStudio controllers discovered by NetScan.
+2. If connect failed in real mode:
+Report exact NetScan/discovery error and discovered controllers.
 
-## Control Precheck Behavior
+3. If motion blocked in real mode:
+Check missing `safety_confirmed:true` first.
 
-Before motion actions (`set_joints`, `movj`, `go_home`, `execute_rapid`, `motors_on`, `motors_off`),
-the plugin now checks:
+4. If virtual movement not visible:
+Check ws-bridge connection and viewer model loading.
 
-- whether a robot is connected
-- current connected type (`virtual` or `real`)
-- environment readiness for virtual viewer control
+## Action Reference (Common)
 
-If not ready, control is blocked with actionable guidance.
-
-Virtual precheck requirements:
-- ws-bridge connected (port `9877`)
-- `robot_kinematic_viewer.html` connected
-- robot `.glb` model loaded
-
-When viewer is not ready but you still want local-state simulation only, add:
-
-```
-allow_local_only:true
-```
-
-Real mode precheck requirements:
-- `safety_confirmed:true` is required before control actions
-- `execute_rapid` is blocked by default (requires `allow_unsafe_rapid:true`)
-- plugin enforces IRB-120 safety policy: joint limits, speed cap, max step, tabletop TCP Z floor estimate
-
-Recommended safe real-mode command format:
-
-```
-abb_robot action:movj mode:real host:127.0.0.1 port:7000 safety_confirmed:true joints:[0,-20,20,0,20,0] speed:12
-```
-
-The plugin will:
-- Connect to the controller via PC SDK
-- Auto-identify the robot model based on joint limits and DH parameters
-- Load the matching robot configuration
-- Report connection status and robot model
-
-## Robot Configuration
-
-Each robot requires a configuration file in `robots/<robot-id>.json`:
-
-```json
-{
-  "id": "abb-crb-15000",
-  "manufacturer": "ABB",
-  "model": "CRB 15000",
-  "dof": 6,
-  "joints": [
-    {
-      "index": 0,
-      "id": "joint0",
-      "label": "J1 - Base Rotation",
-      "type": "revolute",
-      "min": -180.0,
-      "max": 180.0,
-      "speed": 250.0,
-      "home": 0.0
-    }
-  ],
-  "presets": {
-    "home": [0, 0, 0, 0, 0, 0],
-    "ready": [0, -30, 60, 0, 30, 0]
-  },
-  "sequences": {
-    "wave_sequence": {
-      "steps": [
-        { "joints": [45, -30, 60, 0, 30, 0], "durationMs": 800, "speed": 100 }
-      ]
-    }
-  }
-}
-```
-
-## Available Actions
-
-### connect
-Connect to ABB robot controller.
-
-**Parameters:**
-- `host` (required): Controller IP address or hostname
-- `port` (optional): Controller port (default: 7000)
-- `robot_id` (optional): Robot config ID (auto-detected if omitted)
-
-**Example:**
-```
-abb_robot action:connect host:192.168.125.1 port:7000
-```
-
-### disconnect
-Disconnect from controller.
-
-### get_status
-Get controller and robot status (operation mode, motor state, RAPID running).
-
-### get_version
-Get the plugin version string for debugging.
-
-### get_joints
-Get current joint positions in degrees.
-
-### set_joints
-Move robot to specified joint positions.
-
-**Parameters:**
-- `joints` (required): Array of joint angles in degrees
-- `speed` (optional): Movement speed 1-100% (default: 100)
-
-**Example:**
-```
-abb_robot action:set_joints joints:[0,-30,60,0,30,0] speed:50
-```
-
-Joint values are automatically clamped to configured limits.
-
-### movj
-Continuous joint motion from current (or specified start) position to target, with smooth interpolation.
-
-**Parameters:**
-- `joints` (required): Target joint angles in degrees
-- `start_joints` (optional): Starting joint angles (uses current position if omitted)
-- `speed` (optional): Movement speed 1-100% (default: 45)
-- `max_joint_step` (optional): Max interpolation step per joint in degrees (default: 6)
-- `min_samples` (optional): Minimum interpolation samples per segment (default: 2)
-- `interpolation` (optional): Interpolation profile — `linear`, `smoothstep`, or `cosine` (default: `cosine`)
-- `module_name` (optional): RAPID module name (default: `MoveJSegment`)
-
-**Example:**
-```
-abb_robot action:movj joints:[30,-20,55,15,25,10] speed:40
-abb_robot action:movj joints:[90,0,0,0,0,0] start_joints:[0,0,0,0,0,0] speed:60 interpolation:smoothstep
-```
-
-### set_preset
-Apply a named preset position.
-
-**Parameters:**
-- `preset` (required): Preset name (e.g. "home", "ready")
-- `speed` (optional): Movement speed 1-100%
-
-**Example:**
-```
-abb_robot action:set_preset preset:ready speed:75
-```
-
-### run_sequence
-Execute a named motion sequence.
-
-**Parameters:**
-- `sequence` (required): Sequence name (e.g. "wave_sequence")
-
-**Example:**
-```
-abb_robot action:run_sequence sequence:wave_sequence
-```
-
-Sequences are converted to RAPID programs and executed on the controller.
-
-### go_home
-Return all joints to home position (typically all zeros).
-
-### identify_robot
-Identify the connected robot model by matching controller joint limits and DH parameters against known robot configurations.
-
-**Example:**
-```
-abb_robot action:identify_robot
-```
-
-### execute_rapid
-Load and immediately run RAPID code on the controller in one step.
-
-**Parameters:**
-- `rapid_code` (required): RAPID program code
-- `module_name` (optional): Module name (default: "MainModule")
-
-**Example:**
-```
-abb_robot action:execute_rapid rapid_code:"MODULE MainModule\n  PROC main()\n    MoveJ [[0,0,0,0,0,0],[9E9,9E9,9E9,9E9,9E9,9E9]], v100, fine, tool0;\n  ENDPROC\nENDMODULE"
-```
-
-### load_rapid
-Stage a RAPID program on the controller without executing it. Use `start_program` afterwards to begin execution.
-
-**Parameters:**
-- `rapid_code` (required): RAPID program code
-- `module_name` (optional): Module name (default: "MainModule")
-
-**Example:**
-```
-abb_robot action:load_rapid rapid_code:"MODULE MyModule\n  PROC main()\n    ...\n  ENDPROC\nENDMODULE"
-```
-
-### start_program
-Start execution of the currently loaded RAPID program on the controller.
-
-### stop_program
-Stop the currently running RAPID program on the controller.
-
-### motors_on / motors_off
-Turn robot motors on or off.
-
-### list_robots
-List all available robot configurations.
-
-### list_presets
-List presets for current or specified robot.
-
-**Parameters:**
-- `robot_id` (optional): Robot config ID
-
-### list_sequences
-List motion sequences for current or specified robot.
-
-### dance_two_points
-Execute a continuous dance motion oscillating between two joint positions.
-
-**Parameters:**
-- `point_a` (required): First joint position (array of angles in degrees)
-- `point_b` (required): Second joint position (array of angles in degrees)
-- `repeat` (optional): Number of A-B oscillations (default: 2)
-- `speed` (optional): Movement speed 1-100% (default: 45)
-- `max_joint_step` (optional): Max interpolation step (default: 6)
-- `min_samples` (optional): Minimum interpolation samples (default: 2)
-- `interpolation` (optional): `linear`, `smoothstep`, or `cosine` (default: `cosine`)
-- `auto_connect` (optional): Auto-connect from last position to point A (default: true)
-- `return_to_a` (optional): Return to point A at end (default: false)
-- `module_name` (optional): RAPID module name (default: `DanceSegment`)
-
-**Example:**
-```
-abb_robot action:dance_two_points point_a:[0,-30,60,0,30,0] point_b:[90,-30,60,45,30,0] repeat:4 speed:50
-```
-
-### dance_template
-Execute a built-in dance template motion pattern.
-
-**Parameters:**
-- `template` (required): Template name — `wave`, `bounce`, `sway`, or `twist`
-- `amplitude` (optional): Amplitude scale 0.1-2.0 (default: 1.0)
-- `beats` (optional): Number of beats mapped to repeat count (default: 8)
-- `speed` (optional): Movement speed 1-100% (default: 45)
-- `max_joint_step` (optional): Max interpolation step (default: 6)
-- `interpolation` (optional): `linear`, `smoothstep`, or `cosine` (default: `cosine`)
-- `module_name` (optional): RAPID module name
-
-**Example:**
-```
-abb_robot action:dance_template template:wave beats:8 speed:50
-abb_robot action:dance_template template:bounce amplitude:1.5
-```
-
-### get_motion_memory
-View motion history including last target position and recent history entries.
-
-### reset_motion_memory
-Clear all motion history and last target position.
-
-## Multi-Robot Support
-
-The plugin supports multiple robot configurations. Each robot is identified by:
-
-1. **Joint limits** - Min/max angles for each joint
-2. **DH parameters** - Denavit-Hartenberg kinematic parameters
-3. **DOF** - Number of degrees of freedom
-
-When connecting, the plugin automatically identifies the robot model by comparing
-controller data with available configurations.
-
-To add a new robot:
-
-1. Create `robots/<robot-id>.json` with robot specifications
-2. Put safety policy in the same file under `safety`:
-  - `realSafeSpeedCap`
-  - `realMaxJointDelta`
-  - `tabletopMinTcpZ`
-3. Connect with explicit profile:
-  - `abb_robot action:connect mode:real host:<ip> robot_profile:<robot-id>`
-4. Validate profile availability:
-  - `abb_robot action:list_robots`
-
-Recommended integration contract for new ABB models:
-1. Add JSON profile in `extensions/abb-robot-control/robots/`.
-2. Keep DH and limits aligned with official robot data.
-3. Run connect + get_status + get_joints + movj(small step) smoke test.
-4. Only then enable higher-level workflows (presets/sequences/RAPID).
-
-## Safety Notes
-
-- Always verify joint limits before moving
-- Start with low speeds (20-50%) for testing
-- Ensure workspace is clear before executing motions
-- Use emergency stop if unexpected behavior occurs
-- Test sequences in simulation before running on real hardware
-
-## RAPID Program Generation
-
-The plugin automatically generates RAPID code for:
-
-- Single joint movements (`set_joints`)
-- Continuous interpolated motions (`movj`)
-- Motion sequences (`run_sequence`)
-- Dance patterns (`dance_two_points`, `dance_template`)
-
-Generated programs use:
-- `MoveAbsJ` for joint movements
-- Speed values: `v1` to `v100` (percentage)
-- Zone values: `fine` (precise) or `z10` (blended)
-
-## Troubleshooting
-
-**Connection fails:**
-- Verify controller IP address and network connectivity
-- Check firewall settings (port 7000)
-- Ensure PC SDK is installed correctly
-- Verify controller is in AUTO mode
-
-**Robot doesn't move:**
-- Check motor state with `get_status`
-- Turn motors on with `motors_on`
-- Verify operation mode is AUTO
-- Check for active RAPID programs
-
-**RAPID semantic errors (e.g. `T_ROB1 - MainModule - line X`):**
-- Run `abb_robot_real action:analyze_logs categoryId:0 limit:30`
-- Use `abb_robot_real action:list_tasks` to confirm valid task/module names
-- Re-load corrected RAPID code before start/reset operations
-
-**Joint limits exceeded:**
-- Plugin automatically clamps values to configured limits
-- Check robot configuration file for correct min/max values
-- Violations are reported in tool response
-
-**Robot not identified:**
-- Use `identify_robot` action to re-identify
-- Manually specify `robot_id` parameter
-- Verify robot configuration file exists
-- Check joint limits and DH parameters match actual robot
-
-## Example Workflows
-
-### Basic Movement
-```
-User: Connect to robot at 192.168.125.1
-AI: abb_robot action:connect host:192.168.125.1
-
-User: Move to ready position
-AI: abb_robot action:set_preset preset:ready
-
-User: Now move joint 1 to 90 degrees
-AI: abb_robot action:set_joints joints:[90,0,0,0,0,0]
-```
-
-### Smooth Continuous Motion
-```
-User: Smoothly move to target position at speed 40
-AI: abb_robot action:movj joints:[30,-20,55,15,25,10] speed:40
-
-User: Use linear interpolation for the next move
-AI: abb_robot action:movj joints:[0,0,0,0,0,0] speed:60 interpolation:linear
-```
-
-### Execute Sequence
-```
-User: Make the robot wave
-AI: abb_robot action:run_sequence sequence:wave_sequence
-
-User: What other sequences are available?
-AI: abb_robot action:list_sequences
-```
-
-### Dance Patterns
-```
-User: Make the robot dance
-AI: abb_robot action:dance_template template:wave beats:8 speed:50
-
-User: Dance between two custom poses
-AI: abb_robot action:dance_two_points point_a:[0,-30,60,0,30,0] point_b:[90,-30,60,45,30,0] repeat:4
-```
-
-### RAPID Program Management
-```
-User: Load a custom RAPID program
-AI: abb_robot action:load_rapid rapid_code:"MODULE PickPlace\n  PROC main()\n    MoveJ pPick, v100, fine, tool0;\n  ENDPROC\nENDMODULE"
-
-User: Start the loaded program
-AI: abb_robot action:start_program
-
-User: Stop the program
-AI: abb_robot action:stop_program
-```
-
-## Configuration
-
-Plugin configuration in `openclaw.json`:
-
-```json
-{
-  "plugins": {
-    "entries": {
-      "abb-robot-control": {
-        "enabled": true,
-        "config": {
-          "controllerHost": "192.168.125.1",
-          "controllerPort": 7000,
-          "defaultRobot": "abb-crb-15000",
-          "autoConnect": false,
-          "rapidProgramPath": "/hd0a/programs/"
-        }
-      }
-    }
-  }
-}
-```
-
-## Architecture
-
-```
-OpenClaw Chat
-     │
-     ▼
-abb_robot MCP Tool
-     │
-     ▼
-ABB Controller (abb-controller.ts)
-     │
-     ▼
-ABB PC SDK (C# Bridge)
-     │
-     ▼
-Robot Controller (IRC5)
-     │
-     ▼
-Physical Robot
-```
-
-The plugin uses a C# bridge process to interface with ABB's PC SDK, which
-communicates with the robot controller over TCP/IP.
+- Connect: `connect`
+- Disconnect: `disconnect`
+- Status: `get_status`
+- Current joints: `get_joints`
+- Set joints: `set_joints`
+- MoveJ: `movj`
+- Home: `go_home`
+- RAPID execute: `execute_rapid`
+- Motors: `motors_on`, `motors_off`
+- List robot profiles: `list_robots`
+- Version: `get_version`

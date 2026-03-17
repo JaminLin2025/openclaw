@@ -981,7 +981,9 @@ const plugin = {
     "Control ABB robots in real and virtual modes. " +
     "Virtual mode connects to the 3D kinematic viewer via WebSocket for " +
     "smooth animated motion (movj with speed control). " +
-    "Real mode communicates with actual ABB controllers via PC SDK/C# bridge.",
+    "Real mode communicates with actual ABB controllers via PC SDK/C# bridge. " +
+    "When connect mode is auto and a real target host is explicitly provided, " +
+    "auto fallback to virtual is suppressed and real connection errors are returned directly.",
   configSchema: {
     type: "object",
     additionalProperties: false,
@@ -1001,7 +1003,8 @@ const plugin = {
         "set_joints, movj (smooth joint motion with speed), go_home, execute_rapid, " +
         "motors_on, motors_off, list_robots, get_version. " +
         "Virtual mode sends commands to the 3D viewer via WebSocket for animated motion. " +
-        "Real mode communicates with actual ABB controllers via PC SDK.",
+        "Real mode communicates with actual ABB controllers via PC SDK. " +
+        "Use mode:real for physical robot operations.",
       parameters: {
         type: "object",
         additionalProperties: true,
@@ -1013,7 +1016,7 @@ const plugin = {
               "set_joints, movj, go_home, execute_rapid, motors_on, motors_off, " +
               "list_robots, get_version"
           },
-          mode: { type: "string", enum: ["virtual", "real", "auto"], description: "Operation mode (default: auto)" },
+          mode: { type: "string", enum: ["virtual", "real", "auto"], description: "Operation mode. Use real for physical robot control; auto is for convenience." },
           host: { type: "string", description: "Controller host (real) or bridge host (virtual)" },
           port: { type: "number", description: "Controller port (real: 7000) or bridge port (virtual: 9877)" },
           robot_id: { type: "string", description: "Robot profile id (legacy alias)" },
@@ -1088,10 +1091,45 @@ const plugin = {
           if (requestedMode === "auto") {
             // Connect in auto: try real first, then fall back to virtual bridge mode.
             if (action === "connect") {
+              const requestedHost = String(params?.host ?? "").trim();
+              const configuredHost = String(config?.controllerHost ?? "").trim();
+              // If caller/config explicitly points to a real controller, do not silently downgrade to virtual.
+              const preferRealOnly =
+                requestedHost.length > 0 ||
+                configuredHost.length > 0 ||
+                params?.safety_confirmed === true;
+
               try {
                 const realResult = await executeReal(action, params);
                 if (realResult?.details?.connected) return realResult;
-              } catch {}
+                if (preferRealOnly) {
+                  return asTextResult(
+                    `Auto connect attempted REAL mode and failed; no virtual fallback was applied.\n` +
+                    `Reason: ${realResult?.details?.result?.error ?? "unknown"}`,
+                    {
+                      ...(realResult?.details ?? {}),
+                      mode: "real",
+                      fallbackSuppressed: true,
+                      target: "real"
+                    }
+                  );
+                }
+              } catch (realErr) {
+                if (preferRealOnly) {
+                  return asTextResult(
+                    `Auto connect attempted REAL mode and failed with an exception; no virtual fallback was applied.\n` +
+                    `Reason: ${String(realErr?.message ?? realErr)}`,
+                    {
+                      success: false,
+                      mode: "real",
+                      fallbackSuppressed: true,
+                      target: "real",
+                      error: String(realErr?.message ?? realErr),
+                      attemptedHost: requestedHost || configuredHost || null
+                    }
+                  );
+                }
+              }
 
               const vParams = { ...params };
               if (!vParams.port) vParams.port = config?.wsBridgePort ?? WS_BRIDGE_DEFAULT_PORT;

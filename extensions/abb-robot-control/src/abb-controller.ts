@@ -201,11 +201,12 @@ export class ABBController extends EventEmitter {
    */
   generateRapidMoveJoints(joints: number[], speed: number = 100, zone: string = "fine"): string {
     const jointsStr = joints.map((j, i) => `${j.toFixed(2)}`).join(", ");
+    const speedData = this.formatSpeedData(speed);
     
     return `MODULE MainModule
   PROC main()
     ! Move to target joint position
-    MoveAbsJ [[${jointsStr}], [9E9, 9E9, 9E9, 9E9, 9E9, 9E9]], v${speed}, ${zone}, tool0;
+    MoveAbsJ [[${jointsStr}], [9E9, 9E9, 9E9, 9E9, 9E9, 9E9]], ${speedData}, ${zone}, tool0;
   ENDPROC
 ENDMODULE`;
   }
@@ -221,7 +222,8 @@ ENDMODULE`;
       const jointsStr = pos.joints.map(j => j.toFixed(2)).join(", ");
       const speed = pos.speed || 100;
       const zone = pos.zone || (i === positions.length - 1 ? "fine" : "z10");
-      return `    MoveAbsJ [[${jointsStr}], [9E9, 9E9, 9E9, 9E9, 9E9, 9E9]], v${speed}, ${zone}, tool0;`;
+      const speedData = this.formatSpeedData(speed);
+      return `    MoveAbsJ [[${jointsStr}], [9E9, 9E9, 9E9, 9E9, 9E9, 9E9]], ${speedData}, ${zone}, tool0;`;
     }).join("\n");
 
     return `MODULE ${moduleName}
@@ -250,6 +252,11 @@ ENDMODULE`;
     if (!this.connected) {
       throw new Error("Not connected to controller. Call connect() first.");
     }
+  }
+
+  private formatSpeedData(speed: number): string {
+    const tcp = Math.max(1, Math.min(7000, Number(speed) || 100));
+    return `[${tcp.toFixed(3).replace(/\.0+$/, "").replace(/(\.\d*?)0+$/, "$1")},500,5000,1000]`;
   }
 
   /**
