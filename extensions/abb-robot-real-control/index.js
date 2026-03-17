@@ -86,6 +86,127 @@ function psQuoted(value) {
   return String(value).replace(/'/g, "''");
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function maxJointDiff(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return Number.POSITIVE_INFINITY;
+  const n = Math.min(a.length, b.length);
+  let m = 0;
+  for (let i = 0; i < n; i += 1) {
+    const d = Math.abs((Number(a[i]) || 0) - (Number(b[i]) || 0));
+    if (d > m) m = d;
+  }
+  return m;
+}
+
+async function fetchStatusAndLogs(host, port, bridgeDllPath, logLimit = 8) {
+  const [status, log] = await Promise.all([
+    invokeBridge("GetStatus", {}, host, port, bridgeDllPath),
+    invokeBridge("GetEventLogEntries", { limit: logLimit, categoryId: 0 }, host, port, bridgeDllPath),
+  ]);
+
+  const categoryLogs = [];
+  for (const categoryId of [0, 1, 2, 3, 4, 5, 6]) {
+    const entry = await invokeBridge("GetEventLogEntries", { limit: Math.min(logLimit, 5), categoryId }, host, port, bridgeDllPath);
+    if (entry?.success) {
+      categoryLogs.push({ categoryId, categoryName: entry.categoryName, entries: entry.entries || [] });
+    }
+  }
+
+  return { status, log, categoryLogs };
+}
+
+async function waitMotionSettled({
+  host,
+  port,
+  bridgeDllPath,
+  targetJoints,
+  baselineJoints,
+  timeoutMs,
+  pollMs,
+  toleranceDeg,
+  motionDetectDeg,
+}) {
+  const startedAt = Date.now();
+  let observedMovement = false;
+  let lastJoints = baselineJoints;
+  let finalJoints = baselineJoints;
+  let finalStatus = null;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const [jRes, sRes] = await Promise.all([
+      invokeBridge("GetJointPositions", {}, host, port, bridgeDllPath),
+      invokeBridge("GetStatus", {}, host, port, bridgeDllPath),
+    ]);
+
+    if (jRes.success && Array.isArray(jRes.joints)) {
+      finalJoints = jRes.joints;
+      const movedFromBaseline = maxJointDiff(baselineJoints, finalJoints);
+      const movedFromLast = maxJointDiff(lastJoints, finalJoints);
+      if (movedFromBaseline >= motionDetectDeg || movedFromLast >= motionDetectDeg) {
+        observedMovement = true;
+      }
+      lastJoints = finalJoints;
+
+      const targetErr = maxJointDiff(targetJoints, finalJoints);
+      const rapidRunning = !!sRes?.rapidRunning;
+      if (targetErr <= toleranceDeg && !rapidRunning) {
+        finalStatus = sRes;
+        const { status, log } = await fetchStatusAndLogs(host, port, bridgeDllPath);
+        return {
+          success: true,
+          observedMovement,
+          settled: true,
+          durationMs: Date.now() - startedAt,
+          targetErrorDeg: targetErr,
+          finalJoints,
+          status,
+          log,
+        };
+      }
+    }
+
+    if (sRes?.success) {
+      finalStatus = sRes;
+    }
+
+    await sleep(pollMs);
+  }
+
+  const targetErr = maxJointDiff(targetJoints, finalJoints);
+  const { status, log } = await fetchStatusAndLogs(host, port, bridgeDllPath);
+  return {
+    success: false,
+    observedMovement,
+    settled: false,
+    durationMs: Date.now() - startedAt,
+    targetErrorDeg: targetErr,
+    finalJoints,
+    status,
+    log,
+  };
+}
+
+async function waitRapidIdle(host, port, bridgeDllPath, timeoutMs = 60000, pollMs = 500) {
+  const startedAt = Date.now();
+  let lastStatus = null;
+  while (Date.now() - startedAt < timeoutMs) {
+    const status = await invokeBridge("GetStatus", {}, host, port, bridgeDllPath);
+    if (status.success) {
+      lastStatus = status;
+      if (!status.rapidRunning) {
+        const { log } = await fetchStatusAndLogs(host, port, bridgeDllPath);
+        return { success: true, durationMs: Date.now() - startedAt, status, log };
+      }
+    }
+    await sleep(pollMs);
+  }
+  const { status, log } = await fetchStatusAndLogs(host, port, bridgeDllPath);
+  return { success: false, durationMs: Date.now() - startedAt, status: status.success ? status : lastStatus, log };
+}
+
 function runPowerShell(script, timeoutMs = 15000) {
   const psExe = process.env.SystemRoot
     ? path.join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
@@ -182,15 +303,54 @@ async function handleAction(action, params, config) {
     }
 
     case "connect": {
+      const allowVirtualController = params.allowVirtualController === true;
       const conn = await invokeBridge("GetStatus", {}, host, port, bridgeDllPath);
       if (!conn.success) {
         state.connected = false;
         return result(`Real connect failed: ${conn.error || "unknown"}`, { success: false, result: conn });
       }
+
+      // Guardrail: real plugin should not silently attach to virtual controllers.
+      const scan = await invokeBridge("ScanControllers", {}, host, port, bridgeDllPath);
+      const localHostRequested = ["127.0.0.1", "localhost", "::1"].includes(host.toLowerCase());
+      const matchedController = scan?.success
+        ? (scan.controllers || []).find((c) => {
+            const ip = String(c?.ip || "").toLowerCase();
+            const id = String(c?.id || "").toLowerCase();
+            const sys = String(c?.systemId || "").toLowerCase();
+            const name = String(c?.systemName || "").toLowerCase();
+            const target = host.toLowerCase();
+            return ip === target || id === target || sys === target || name === target || (localHostRequested && c?.isVirtual);
+          })
+        : null;
+
+      if (!allowVirtualController && matchedController?.isVirtual) {
+        state.connected = false;
+        return result(
+          `Real connect rejected: target '${host}' resolves to a virtual controller (${matchedController.systemName || "unknown"}). ` +
+          `Use real controller IP/ID, or set allowVirtualController=true only for debugging.`,
+          {
+            success: false,
+            virtualControllerDetected: true,
+            host,
+            port,
+            matchedController,
+            scan,
+          }
+        );
+      }
+
       state.connected = true;
       state.host = host;
       state.port = port;
-      return result(`Real connected (${host}:${port})`, { success: true, connected: true, host, port, status: conn });
+      return result(`Real connected (${host}:${port})`, {
+        success: true,
+        connected: true,
+        host,
+        port,
+        status: conn,
+        controller: matchedController || null,
+      });
     }
 
     case "disconnect":
@@ -294,8 +454,58 @@ async function handleAction(action, params, config) {
       if (!joints || joints.length !== 6) return result("movj/set_joints requires exactly 6 joint values.", { success: false });
       const speed = Number(params.speed || 20);
       const zone = String(params.zone || "fine");
+      const timeoutMs = Math.max(3000, Math.min(120000, Number(params.motionTimeoutMs || 30000)));
+      const pollMs = Math.max(100, Math.min(2000, Number(params.pollIntervalMs || 400)));
+      const toleranceDeg = Math.max(0.05, Math.min(5, Number(params.toleranceDeg || 0.4)));
+      const motionDetectDeg = Math.max(0.05, Math.min(5, Number(params.motionDetectDeg || 0.2)));
+
+      const before = await invokeBridge("GetJointPositions", {}, state.host, state.port, bridgeDllPath);
+      const baselineJoints = Array.isArray(before?.joints) ? before.joints : null;
+
       const r = await invokeBridge("MoveToJoints", { joints, speed, zone }, state.host, state.port, bridgeDllPath);
-      return result(r.success ? "Move executed." : `Move failed: ${r.error || "unknown"}`, { success: !!r.success, result: r });
+      if (!r.success) {
+        const diag = await fetchStatusAndLogs(state.host, state.port, bridgeDllPath);
+        return result(`Move failed: ${r.error || "unknown"}`, {
+          success: false,
+          result: r,
+          before,
+          ...diag,
+        });
+      }
+
+      const verify = await waitMotionSettled({
+        host: state.host,
+        port: state.port,
+        bridgeDllPath,
+        targetJoints: joints,
+        baselineJoints: baselineJoints || joints,
+        timeoutMs,
+        pollMs,
+        toleranceDeg,
+        motionDetectDeg,
+      });
+
+      if (!verify.success) {
+        const noMotion = !verify.observedMovement && maxJointDiff(joints, baselineJoints || joints) > motionDetectDeg;
+        const reason = noMotion
+          ? "No robot motion observed after command dispatch"
+          : `Motion did not settle within timeout (${timeoutMs}ms)`;
+        return result(`Move dispatched but verification failed: ${reason}`, {
+          success: false,
+          verificationFailed: true,
+          reason,
+          before,
+          commandResult: r,
+          verification: verify,
+        });
+      }
+
+      return result("Move executed and verified complete.", {
+        success: true,
+        before,
+        commandResult: r,
+        verification: verify,
+      });
     }
     case "execute_rapid": {
       const code = String(params.code || params.rapid_code || "");
@@ -315,7 +525,30 @@ async function handleAction(action, params, config) {
     case "start_program": {
       const allowRealExecution = params.allowRealExecution === true;
       const r = await invokeBridge("StartRapid", { allowRealExecution }, state.host, state.port, bridgeDllPath);
-      return result(r.success ? "Program started." : `Start failed: ${r.error || "unknown"}`, { success: !!r.success, result: r });
+      if (!r.success) {
+        const diag = await fetchStatusAndLogs(state.host, state.port, bridgeDllPath);
+        return result(`Start failed: ${r.error || "unknown"}`, { success: false, result: r, ...diag });
+      }
+
+      const waitForCompletion = params.waitForCompletion !== false;
+      if (!waitForCompletion) {
+        return result("Program started (not waiting for completion).", { success: true, result: r });
+      }
+
+      const waitMs = Math.max(3000, Math.min(300000, Number(params.programTimeoutMs || 60000)));
+      const idle = await waitRapidIdle(state.host, state.port, bridgeDllPath, waitMs, 500);
+      if (!idle.success) {
+        return result(`Program started but did not finish within timeout (${waitMs}ms).`, {
+          success: false,
+          result: r,
+          waitResult: idle,
+        });
+      }
+      return result("Program execution completed.", {
+        success: true,
+        result: r,
+        waitResult: idle,
+      });
     }
     case "stop_program": {
       const r = await invokeBridge("StopRapid", {}, state.host, state.port, bridgeDllPath);

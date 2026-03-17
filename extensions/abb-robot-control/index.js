@@ -332,6 +332,109 @@ function validateRealJointTargets(targetJoints, currentJoints, speed, profile) {
   return { ok: issues.length === 0, issues, estimatedTcpZ: z };
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function maxJointDiff(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return Number.POSITIVE_INFINITY;
+  const n = Math.min(a.length, b.length);
+  let m = 0;
+  for (let i = 0; i < n; i += 1) {
+    const d = Math.abs((Number(a[i]) || 0) - (Number(b[i]) || 0));
+    if (d > m) m = d;
+  }
+  return m;
+}
+
+async function fetchRealStatusAndLogs(host, port, limit = 8) {
+  const [status, log] = await Promise.all([
+    invokeBridgeSequence("GetStatus", {}, host, port),
+    invokeBridgeSequence("GetEventLogEntries", { limit, categoryId: 0 }, host, port),
+  ]);
+
+  const categoryLogs = [];
+  for (const categoryId of [0, 1, 2, 3, 4, 5, 6]) {
+    const entry = await invokeBridgeSequence("GetEventLogEntries", { limit: Math.min(limit, 5), categoryId }, host, port);
+    if (entry?.success) {
+      categoryLogs.push({ categoryId, categoryName: entry.categoryName, entries: entry.entries || [] });
+    }
+  }
+
+  return { status, log, categoryLogs };
+}
+
+async function waitRealMotionSettled({ host, port, baselineJoints, targetJoints, timeoutMs, pollMs, toleranceDeg, motionDetectDeg }) {
+  const startedAt = Date.now();
+  let observedMovement = false;
+  let lastJoints = baselineJoints;
+  let finalJoints = baselineJoints;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const [jRes, sRes] = await Promise.all([
+      invokeBridgeSequence("GetJointPositions", {}, host, port),
+      invokeBridgeSequence("GetStatus", {}, host, port),
+    ]);
+
+    if (jRes.success && Array.isArray(jRes.joints)) {
+      finalJoints = jRes.joints;
+      const movedFromBaseline = maxJointDiff(baselineJoints, finalJoints);
+      const movedFromLast = maxJointDiff(lastJoints, finalJoints);
+      if (movedFromBaseline >= motionDetectDeg || movedFromLast >= motionDetectDeg) {
+        observedMovement = true;
+      }
+      lastJoints = finalJoints;
+
+      const targetErr = maxJointDiff(targetJoints, finalJoints);
+      const rapidRunning = !!sRes?.rapidRunning;
+      if (targetErr <= toleranceDeg && !rapidRunning) {
+        const diag = await fetchRealStatusAndLogs(host, port);
+        return {
+          success: true,
+          observedMovement,
+          settled: true,
+          durationMs: Date.now() - startedAt,
+          targetErrorDeg: targetErr,
+          finalJoints,
+          ...diag,
+        };
+      }
+    }
+
+    await sleep(pollMs);
+  }
+
+  const targetErr = maxJointDiff(targetJoints, finalJoints);
+  const diag = await fetchRealStatusAndLogs(host, port);
+  return {
+    success: false,
+    observedMovement,
+    settled: false,
+    durationMs: Date.now() - startedAt,
+    targetErrorDeg: targetErr,
+    finalJoints,
+    ...diag,
+  };
+}
+
+async function waitRealProgramIdle(host, port, timeoutMs = 60000, pollMs = 500) {
+  const startedAt = Date.now();
+  let lastStatus = null;
+  while (Date.now() - startedAt < timeoutMs) {
+    const status = await invokeBridgeSequence("GetStatus", {}, host, port);
+    if (status.success) {
+      lastStatus = status;
+      if (!status.rapidRunning) {
+        const diag = await fetchRealStatusAndLogs(host, port);
+        return { success: true, durationMs: Date.now() - startedAt, ...diag };
+      }
+    }
+    await sleep(pollMs);
+  }
+  const diag = await fetchRealStatusAndLogs(host, port);
+  return { success: false, durationMs: Date.now() - startedAt, status: diag.status.success ? diag.status : lastStatus, log: diag.log };
+}
+
 function isViewerConnected() {
   return !!(wsConn && wsConn.readyState === 1);
 }
@@ -792,6 +895,7 @@ async function executeReal(action, params) {
   if (action === "connect") {
     const host = String(params.host ?? "").trim();
     const port = Number(params.port ?? 7000);
+    const allowVirtualController = params.allowVirtualController === true;
     const requestedProfile = normalizeRobotProfileId(params.robot_profile ?? params.robot_id ?? state.robotProfile);
     state.robotProfile = getRobotProfile(requestedProfile).id;
     if (!host) {
@@ -799,6 +903,38 @@ async function executeReal(action, params) {
     }
     const result = await invokeBridgeSequence("GetStatus", {}, host, port);
     if (result.success) {
+      const scan = await invokeBridgeSequence("ScanControllers", {}, host, port);
+      const localHostRequested = ["127.0.0.1", "localhost", "::1"].includes(host.toLowerCase());
+      const matchedController = scan?.success
+        ? (scan.controllers || []).find((c) => {
+            const ip = String(c?.ip || "").toLowerCase();
+            const id = String(c?.id || "").toLowerCase();
+            const sys = String(c?.systemId || "").toLowerCase();
+            const name = String(c?.systemName || "").toLowerCase();
+            const target = host.toLowerCase();
+            return ip === target || id === target || sys === target || name === target || (localHostRequested && c?.isVirtual);
+          })
+        : null;
+
+      if (!allowVirtualController && matchedController?.isVirtual) {
+        state.mode = "real";
+        state.connected = false;
+        return asTextResult(
+          `Real connect rejected: target '${host}' resolves to a virtual controller (${matchedController.systemName || "unknown"}). ` +
+          `Use a real controller IP/ID, or set allowVirtualController=true only for debugging.`,
+          {
+            mode: "real",
+            connected: false,
+            virtualControllerDetected: true,
+            host,
+            port,
+            matchedController,
+            scan,
+            result,
+          }
+        );
+      }
+
       state.mode = "real";
       state.connected = true;
       state.host = host;
@@ -809,7 +945,8 @@ async function executeReal(action, params) {
         host,
         port,
         robotProfile: state.robotProfile,
-        status: result
+        status: result,
+        controller: matchedController || null
       });
     }
     return asTextResult(`Real connect failed: ${result.error ?? "unknown error"}`, {
@@ -873,10 +1010,45 @@ async function executeReal(action, params) {
         speed: safeSpeed,
         zone: String(params.zone ?? "fine")
       }, state.host, state.port);
-      return asTextResult(result.success ? "Real set_joints executed." : `Real set_joints failed: ${result.error ?? "unknown"}`, {
+      if (!result.success) {
+        const diag = await fetchRealStatusAndLogs(state.host, state.port);
+        return asTextResult(`Real set_joints failed: ${result.error ?? "unknown"}`, {
+          mode: "real",
+          connected: false,
+          result,
+          ...diag,
+        });
+      }
+
+      const verify = await waitRealMotionSettled({
+        host: state.host,
+        port: state.port,
+        baselineJoints: currentJoints || joints,
+        targetJoints: joints,
+        timeoutMs: Math.max(3000, Math.min(120000, Number(params.motionTimeoutMs ?? 30000))),
+        pollMs: Math.max(100, Math.min(2000, Number(params.pollIntervalMs ?? 400))),
+        toleranceDeg: Math.max(0.05, Math.min(5, Number(params.toleranceDeg ?? 0.4))),
+        motionDetectDeg: Math.max(0.05, Math.min(5, Number(params.motionDetectDeg ?? 0.2))),
+      });
+
+      if (!verify.success) {
+        const noMotion = !verify.observedMovement && maxJointDiff(joints, currentJoints || joints) > 0.2;
+        const reason = noMotion ? "No robot motion observed after command dispatch" : "Motion did not settle within timeout";
+        return asTextResult(`Real set_joints verification failed: ${reason}`, {
+          mode: "real",
+          connected: false,
+          verificationFailed: true,
+          reason,
+          result,
+          verification: verify,
+        });
+      }
+
+      return asTextResult("Real set_joints executed and verified complete.", {
         mode: "real",
-        connected: result.success,
-        result
+        connected: true,
+        result,
+        verification: verify,
       });
     }
     case "movj": {
@@ -901,10 +1073,45 @@ async function executeReal(action, params) {
         speed: safeSpeed,
         zone: String(params.zone ?? "fine")
       }, state.host, state.port);
-      return asTextResult(result.success ? "Real movj executed." : `Real movj failed: ${result.error ?? "unknown"}`, {
+      if (!result.success) {
+        const diag = await fetchRealStatusAndLogs(state.host, state.port);
+        return asTextResult(`Real movj failed: ${result.error ?? "unknown"}`, {
+          mode: "real",
+          connected: false,
+          result,
+          ...diag,
+        });
+      }
+
+      const verify = await waitRealMotionSettled({
+        host: state.host,
+        port: state.port,
+        baselineJoints: currentJoints || joints,
+        targetJoints: joints,
+        timeoutMs: Math.max(3000, Math.min(120000, Number(params.motionTimeoutMs ?? 30000))),
+        pollMs: Math.max(100, Math.min(2000, Number(params.pollIntervalMs ?? 400))),
+        toleranceDeg: Math.max(0.05, Math.min(5, Number(params.toleranceDeg ?? 0.4))),
+        motionDetectDeg: Math.max(0.05, Math.min(5, Number(params.motionDetectDeg ?? 0.2))),
+      });
+
+      if (!verify.success) {
+        const noMotion = !verify.observedMovement && maxJointDiff(joints, currentJoints || joints) > 0.2;
+        const reason = noMotion ? "No robot motion observed after command dispatch" : "Motion did not settle within timeout";
+        return asTextResult(`Real movj verification failed: ${reason}`, {
+          mode: "real",
+          connected: false,
+          verificationFailed: true,
+          reason,
+          result,
+          verification: verify,
+        });
+      }
+
+      return asTextResult("Real movj executed and verified complete.", {
         mode: "real",
-        connected: result.success,
-        result
+        connected: true,
+        result,
+        verification: verify,
       });
     }
     case "execute_rapid": {
@@ -941,12 +1148,45 @@ async function executeReal(action, params) {
         speed: safeSpeed,
         zone: "fine"
       }, state.host, state.port);
-      if (result.success) state.joints = homeJoints;
-      return asTextResult(result.success ? "Real robot moved to home position." : `Real go_home failed: ${result.error ?? "unknown"}`, {
+      if (!result.success) {
+        const diag = await fetchRealStatusAndLogs(state.host, state.port);
+        return asTextResult(`Real go_home failed: ${result.error ?? "unknown"}`, {
+          mode: "real",
+          connected: false,
+          joints: homeJoints,
+          result,
+          ...diag,
+        });
+      }
+
+      const verify = await waitRealMotionSettled({
+        host: state.host,
+        port: state.port,
+        baselineJoints: currentJoints || homeJoints,
+        targetJoints: homeJoints,
+        timeoutMs: Math.max(3000, Math.min(120000, Number(params.motionTimeoutMs ?? 30000))),
+        pollMs: Math.max(100, Math.min(2000, Number(params.pollIntervalMs ?? 400))),
+        toleranceDeg: Math.max(0.05, Math.min(5, Number(params.toleranceDeg ?? 0.4))),
+        motionDetectDeg: Math.max(0.05, Math.min(5, Number(params.motionDetectDeg ?? 0.2))),
+      });
+
+      if (!verify.success) {
+        return asTextResult("Real go_home verification failed: Motion did not settle within timeout", {
+          mode: "real",
+          connected: false,
+          joints: homeJoints,
+          result,
+          verification: verify,
+        });
+      }
+
+      state.joints = homeJoints;
+      return asTextResult("Real robot moved to home position and verified complete.", {
         mode: "real",
-        connected: result.success,
+        connected: true,
         joints: homeJoints,
-        result
+        result,
+        verification: verify,
       });
     }
     case "motors_on":

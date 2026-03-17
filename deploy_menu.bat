@@ -428,24 +428,27 @@ if not exist "%PACKAGE_DIR%\openclaw.mjs" (
 call :step "Try graceful gateway stop"
 cd /d "%PACKAGE_DIR%"
 call :stop_gateway_processes
+call :step "Stop scheduled gateway supervisor if present"
+schtasks /End /TN "OpenClaw Gateway" >nul 2>nul
+timeout /t 1 >nul
+call :step "Release port %PORT% if occupied"
+for /f "delims=" %%P in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "(Get-NetTCPConnection -LocalPort %PORT% -State Listen -ErrorAction SilentlyContinue ^| Select-Object -ExpandProperty OwningProcess -Unique)"') do (
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "Stop-Process -Id %%P -Force" >nul 2>nul
+)
 call :wait_port_free %PORT%
 if errorlevel 1 (
   echo [ERROR] Port %PORT% is still occupied after stop.
   exit /b 1
 )
 
-call :step "Release port %PORT% if occupied"
-set "PID="
-for /f "delims=" %%P in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "(Get-NetTCPConnection -LocalPort %PORT% -State Listen -ErrorAction SilentlyContinue ^| Select-Object -First 1 -ExpandProperty OwningProcess)"') do set "PID=%%P"
-if defined PID (
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "Stop-Process -Id %PID% -Force" >nul 2>nul
-)
-
 call :step "Release bridge port %BRIDGE_PORT% if occupied"
-set "PID="
-for /f "delims=" %%P in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "(Get-NetTCPConnection -LocalPort %BRIDGE_PORT% -State Listen -ErrorAction SilentlyContinue ^| Select-Object -First 1 -ExpandProperty OwningProcess)"') do set "PID=%%P"
-if defined PID (
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "Stop-Process -Id %PID% -Force" >nul 2>nul
+for /f "delims=" %%P in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "(Get-NetTCPConnection -LocalPort %BRIDGE_PORT% -State Listen -ErrorAction SilentlyContinue ^| Select-Object -ExpandProperty OwningProcess -Unique)"') do (
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "Stop-Process -Id %%P -Force" >nul 2>nul
+)
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$procs = Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" ^| Where-Object { $_.CommandLine -match 'ws-bridge\.ts' -or $_.CommandLine -match 'mock_virtual_bridge\.mjs' }; foreach($p in $procs){ try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop } catch {} }" >nul 2>nul
+call :wait_port_free %BRIDGE_PORT%
+if errorlevel 1 (
+  echo [WARN] Bridge port %BRIDGE_PORT% is still occupied. Gateway may fail if ABB bridge plugin auto-starts.
 )
 
 call :step "Rotate gateway log"
@@ -616,7 +619,7 @@ if exist "%BACKUP_DIR%\%REL%" (
 exit /b 0
 
 :stop_gateway_processes
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$procs = Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" ^| Where-Object { $_.CommandLine -match 'openclaw\.mjs\s+gateway' -or $_.CommandLine -match 'openclaw-runtime-next\\package\\openclaw\.mjs' -or $_.CommandLine -match 'openclaw-runtime-live\\package\\openclaw\.mjs' -or $_.CommandLine -match 'openclaw-runtime\\package\\openclaw\.mjs' }; foreach($p in $procs){ try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop } catch {} }" >nul 2>nul
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$procs = Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" ^| Where-Object { $_.CommandLine -match 'openclaw\.mjs\s+gateway' -or $_.CommandLine -match 'dist\\index\.js\s+gateway' -or $_.CommandLine -match 'openclaw-runtime-next\\package\\openclaw\.mjs' -or $_.CommandLine -match 'openclaw-runtime-live\\package\\openclaw\.mjs' -or $_.CommandLine -match 'openclaw-runtime\\package\\openclaw\.mjs' }; foreach($p in $procs){ try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop } catch {} }" >nul 2>nul
 timeout /t 1 >nul
 exit /b 0
 
@@ -638,7 +641,7 @@ set "WG_PORT=%~1"
 set "WG_SECS=%~2"
 if "%WG_PORT%"=="" set "WG_PORT=%PORT%"
 if "%WG_SECS%"=="" set "WG_SECS=60"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$port=%WG_PORT%; $secs=%WG_SECS%; if($secs -le 0){ $secs=60 }; $startupDeadline=(Get-Date).AddSeconds(25); $started=$false; while((Get-Date)-lt $startupDeadline){ try { $r=Invoke-WebRequest -Uri ('http://127.0.0.1:{0}' -f $port) -UseBasicParsing -TimeoutSec 6; if($r.StatusCode -eq 200){ $started=$true; break } } catch {}; Start-Sleep -Seconds 2 }; if(-not $started){ exit 1 }; $stableDeadline=(Get-Date).AddSeconds($secs); while((Get-Date)-lt $stableDeadline){ $proc=Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" ^| Where-Object { $_.CommandLine -match 'openclaw\.mjs\s+gateway\s+run' }; if(-not $proc){ exit 1 }; try { $r=Invoke-WebRequest -Uri ('http://127.0.0.1:{0}' -f $port) -UseBasicParsing -TimeoutSec 6; if($r.StatusCode -ne 200){ exit 1 } } catch { exit 1 }; Start-Sleep -Seconds 5 }; exit 0" >nul 2>nul
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$port=%WG_PORT%; $secs=%WG_SECS%; if($secs -le 0){ $secs=60 }; $startupDeadline=(Get-Date).AddSeconds(25); $started=$false; while((Get-Date)-lt $startupDeadline){ try { $r=Invoke-WebRequest -Uri ('http://127.0.0.1:{0}' -f $port) -UseBasicParsing -TimeoutSec 6; if($r.StatusCode -eq 200){ $started=$true; break } } catch {}; Start-Sleep -Seconds 2 }; if(-not $started){ exit 1 }; $stableDeadline=(Get-Date).AddSeconds($secs); while((Get-Date)-lt $stableDeadline){ $proc=Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" ^| Where-Object { $_.CommandLine -match 'openclaw\.mjs\s+gateway\s+run' -or $_.CommandLine -match 'dist\\index\.js\s+gateway' }; if(-not $proc){ exit 1 }; try { $r=Invoke-WebRequest -Uri ('http://127.0.0.1:{0}' -f $port) -UseBasicParsing -TimeoutSec 6; if($r.StatusCode -ne 200){ exit 1 } } catch { exit 1 }; Start-Sleep -Seconds 5 }; exit 0" >nul 2>nul
 if errorlevel 1 exit /b 1
 exit /b 0
 
