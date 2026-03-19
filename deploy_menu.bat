@@ -68,9 +68,10 @@ echo [8] Stop OpenClaw service from a specified directory
 echo [9] Show deploy gateway log tail
 echo [V] Verify post-release runtime health
 echo [R] Publish + Restart + Verify (recommended)
+echo [K] Kill node process
 echo [0] Exit
 set "CHOICE="
-set /p "CHOICE=Select [0-9, V, R]: " || goto done
+set /p "CHOICE=Select [0-9, V, R, K]: " || goto done
 if not defined CHOICE goto done
 
 if "%CHOICE%"=="1" goto do_compile
@@ -84,11 +85,17 @@ if "%CHOICE%"=="8" goto do_stop_dir
 if "%CHOICE%"=="9" goto do_logs
 if /I "%CHOICE%"=="V" goto do_verify
 if /I "%CHOICE%"=="R" goto do_release_verify
+if /I "%CHOICE%"=="K" goto do_kill_node
 if "%CHOICE%"=="0" goto done
 
 echo.
 echo [WARN] Invalid input. Please enter 0-9, V, or R.
 pause
+goto menu
+
+:do_release_verify
+taskkill /F /IM node.exe
+echo Kill node process done
 goto menu
 
 :do_release_verify

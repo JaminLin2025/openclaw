@@ -1,15 +1,14 @@
 /**
  * abb-controller.ts
- * ABB Robot Controller connection and control via PC SDK
- * 
- * This module provides a TypeScript/Node.js interface to ABB's PC SDK
- * for connecting to real ABB robot controllers and executing RAPID programs.
+ * ABB Robot Controller — TypeScript facade over ABBCSharpBridge.
+ *
+ * All public methods map 1-to-1 to C# ABBBridge methods exposed in ABBBridge.cs.
+ * The bridge is instantiated once per ABBController and reused across calls so
+ * the underlying C# object retains its connection state.
  */
 
-import { spawn, ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import path from "node:path";
-import fs from "node:fs";
+import { ABBCSharpBridge } from "./abb-csharp-bridge.js";
 
 export interface ControllerConfig {
   host: string;
@@ -19,319 +18,316 @@ export interface ControllerConfig {
   password?: string;
 }
 
-export interface RobotPosition {
-  joints: number[];
-  cartesian?: {
-    x: number;
-    y: number;
-    z: number;
-    q1: number;
-    q2: number;
-    q3: number;
-    q4: number;
-  };
-}
-
 export interface ControllerStatus {
   connected: boolean;
-  operationMode?: "AUTO" | "MANUAL" | "MANUAL_FULL";
-  motorState?: "ON" | "OFF";
+  operationMode?: string;
+  motorState?: string;
   rapidRunning?: boolean;
+  rapidExecutionStatus?: string;
   systemName?: string;
 }
 
+export interface ScanResult {
+  success: boolean;
+  total: number;
+  controllers: Array<{
+    ip: string;
+    id: string;
+    isVirtual: boolean;
+    version: string;
+    systemId: string;
+    systemName: string;
+    hostName: string;
+    controllerName: string;
+  }>;
+}
+
 /**
- * ABB Robot Controller interface
- * Manages connection and communication with actual ABB robot controllers
+ * ABBController — manages one connection to an ABB robot controller.
+ * Instantiate a fresh instance per session; it owns a single ABBCSharpBridge.
  */
 export class ABBController extends EventEmitter {
   private config: ControllerConfig;
-  private connected: boolean = false;
-  private csProcess: ChildProcess | null = null;
-  private systemName: string = "";
+  private _connected: boolean = false;
+  private _systemName: string = "";
+  private bridge: ABBCSharpBridge;
 
   constructor(config: ControllerConfig) {
     super();
-    this.config = {
-      port: 7000,
-      userName: "Default User",
-      password: "robotics",
-      ...config,
+    this.config = { port: 7000, ...config };
+    this.bridge = new ABBCSharpBridge();
+  }
+
+  // ── Connection ─────────────────────────────────────────────────────────────
+
+  async connect(): Promise<void> {
+    if (this._connected) throw new Error("Already connected to controller");
+    const result = await this.bridge.connect(this.config.host);
+    if (!result.success) throw new Error(result.error ?? "Failed to connect to controller");
+    this._connected = true;
+    this._systemName = String(result.systemName ?? "");
+    this.emit("connected", { systemName: this._systemName });
+  }
+
+  async disconnect(): Promise<void> {
+    if (!this._connected) return;
+    try {
+      await this.bridge.disconnect();
+    } finally {
+      this._connected = false;
+      this.emit("disconnected");
+    }
+  }
+
+  // ── Discovery ──────────────────────────────────────────────────────────────
+
+  /** Scan for ABB controllers on the network. Does NOT require connect(). */
+  async scanControllers(): Promise<ScanResult> {
+    const r = await this.bridge.scanControllers();
+    return r as unknown as ScanResult;
+  }
+
+  // ── Status & Info ──────────────────────────────────────────────────────────
+
+  async getStatus(): Promise<ControllerStatus> {
+    if (!this._connected) return { connected: false };
+    const r = await this.bridge.getStatus();
+    return {
+      connected: true,
+      operationMode: String(r.operationMode ?? ""),
+      motorState: String(r.motorState ?? ""),
+      rapidRunning: Boolean(r.rapidRunning),
+      rapidExecutionStatus: String(r.rapidExecutionStatus ?? ""),
+      systemName: this._systemName,
     };
   }
 
-  /**
-   * Connect to the ABB robot controller
-   */
-  async connect(): Promise<void> {
-    if (this.connected) {
-      throw new Error("Already connected to controller");
-    }
-
-    try {
-      // Use C# helper process to interface with ABB PC SDK
-      const result = await this.executeCSCommand("connect", {
-        host: this.config.host,
-        port: this.config.port,
-        userName: this.config.userName,
-        password: this.config.password,
-      });
-
-      if (result.success) {
-        this.connected = true;
-        this.systemName = result.systemName || "";
-        this.emit("connected", { systemName: this.systemName });
-      } else {
-        throw new Error(result.error || "Failed to connect to controller");
-      }
-    } catch (error) {
-      throw new Error(`Connection failed: ${error}`);
-    }
+  async getSystemInfo(): Promise<Record<string, unknown>> {
+    this._ensureConnected();
+    return this.bridge.getSystemInfo();
   }
 
-  /**
-   * Disconnect from the controller
-   */
-  async disconnect(): Promise<void> {
-    if (!this.connected) return;
-
-    try {
-      await this.executeCSCommand("disconnect", {});
-      this.connected = false;
-      this.emit("disconnected");
-    } catch (error) {
-      console.warn("Error during disconnect:", error);
-    }
+  async getServiceInfo(): Promise<Record<string, unknown>> {
+    this._ensureConnected();
+    return this.bridge.getServiceInfo();
   }
 
-  /**
-   * Get current controller status
-   */
-  async getStatus(): Promise<ControllerStatus> {
-    if (!this.connected) {
-      return { connected: false };
-    }
+  // ── Speed ──────────────────────────────────────────────────────────────────
 
-    try {
-      const result = await this.executeCSCommand("getStatus", {});
-      return {
-        connected: true,
-        operationMode: result.operationMode,
-        motorState: result.motorState,
-        rapidRunning: result.rapidRunning,
-        systemName: this.systemName,
-      };
-    } catch (error) {
-      return { connected: false };
-    }
+  async getSpeedRatio(): Promise<number> {
+    this._ensureConnected();
+    const r = await this.bridge.getSpeedRatio();
+    if (!r.success) throw new Error(String(r.error ?? "getSpeedRatio failed"));
+    return Number(r.speedRatio);
   }
 
-  /**
-   * Get current robot joint positions
-   */
+  async setSpeedRatio(speed: number): Promise<number> {
+    this._ensureConnected();
+    const r = await this.bridge.setSpeedRatio(speed);
+    if (!r.success) throw new Error(String(r.error ?? "setSpeedRatio failed"));
+    return Number(r.speedRatio);
+  }
+
+  // ── Position ───────────────────────────────────────────────────────────────
+
   async getJointPositions(): Promise<number[]> {
-    this.ensureConnected();
-
-    const result = await this.executeCSCommand("getJointPositions", {});
-    return result.joints || [];
+    this._ensureConnected();
+    return this.bridge.getJointPositions();
   }
 
-  /**
-   * Move robot to specified joint positions
-   */
-  async moveToJoints(joints: number[], speed?: number): Promise<void> {
-    this.ensureConnected();
-
-    await this.executeCSCommand("moveToJoints", {
-      joints,
-      speed: speed || 100,
-    });
+  async getWorldPosition(): Promise<{ x: number; y: number; z: number; rx: number; ry: number; rz: number }> {
+    this._ensureConnected();
+    const r = await this.bridge.getWorldPosition();
+    if (!r.success) throw new Error(String(r.error ?? "getWorldPosition failed"));
+    return {
+      x: Number(r.x), y: Number(r.y), z: Number(r.z),
+      rx: Number(r.rx), ry: Number(r.ry), rz: Number(r.rz),
+    };
   }
 
-  /**
-   * Execute a RAPID program on the controller
-   */
-  async executeRapidProgram(programCode: string, moduleName: string = "MainModule"): Promise<void> {
-    this.ensureConnected();
+  // ── Event Log ──────────────────────────────────────────────────────────────
 
-    await this.executeCSCommand("executeRapid", {
-      code: programCode,
-      moduleName,
-    });
+  async getEventLogEntries(categoryId: number = 0, limit: number = 20): Promise<Record<string, unknown>> {
+    this._ensureConnected();
+    return this.bridge.getEventLogEntries(categoryId, limit);
   }
 
-  /**
-   * Load a RAPID program to the controller
-   */
-  async loadRapidProgram(programCode: string, moduleName: string = "MainModule"): Promise<void> {
-    this.ensureConnected();
+  // ── Tasks & Modules ────────────────────────────────────────────────────────
 
-    await this.executeCSCommand("loadRapid", {
-      code: programCode,
-      moduleName,
-    });
+  async listTasks(): Promise<Record<string, unknown>> {
+    this._ensureConnected();
+    return this.bridge.listTasks();
   }
 
-  /**
-   * Start RAPID program execution
-   */
-  async startRapid(): Promise<void> {
-    this.ensureConnected();
-    await this.executeCSCommand("startRapid", {});
+  async backupModule(
+    moduleName: string = "",
+    taskName: string = "",
+    outputDir: string = "."
+  ): Promise<Record<string, unknown>> {
+    this._ensureConnected();
+    return this.bridge.backupModule(moduleName, taskName, outputDir);
   }
 
-  /**
-   * Stop RAPID program execution
-   */
+  async resetProgramPointer(taskName: string = "T_ROB1"): Promise<void> {
+    this._ensureConnected();
+    const r = await this.bridge.resetProgramPointer(taskName);
+    if (!r.success) throw new Error(String(r.error ?? "resetProgramPointer failed"));
+  }
+
+  // ── RAPID ──────────────────────────────────────────────────────────────────
+
+  /** Load RAPID code to the controller without starting execution. */
+  async loadRapidProgram(
+    code: string,
+    allowRealExecution: boolean = false
+  ): Promise<void> {
+    this._ensureConnected();
+    const r = await this.bridge.loadRapidProgram(code, allowRealExecution);
+    if (!r.success) throw new Error(String(r.error ?? "loadRapidProgram failed"));
+  }
+
+  /** Start previously loaded RAPID program. */
+  async startRapid(allowRealExecution: boolean = true): Promise<void> {
+    this._ensureConnected();
+    const r = await this.bridge.startRapid(allowRealExecution);
+    if (!r.success) throw new Error(String(r.error ?? "startRapid failed"));
+  }
+
+  /** Stop currently running RAPID program. */
   async stopRapid(): Promise<void> {
-    this.ensureConnected();
-    await this.executeCSCommand("stopRapid", {});
+    this._ensureConnected();
+    const r = await this.bridge.stopRapid();
+    if (!r.success) throw new Error(String(r.error ?? "stopRapid failed"));
   }
 
   /**
-   * Set motors on/off
+   * Execute a RAPID program end-to-end:
+   * load → reset pointer → start → wait for completion (event-driven in C#).
+   * This is the recommended path for agent-driven motion.
    */
-  async setMotors(state: "ON" | "OFF"): Promise<void> {
-    this.ensureConnected();
-    await this.executeCSCommand("setMotors", { state });
+  async executeRapidProgram(
+    code: string,
+    _moduleName: string = "MainModule",
+    allowRealExecution: boolean = true
+  ): Promise<void> {
+    this._ensureConnected();
+    // ABBBridge.MoveToJoints calls ExecuteRapidProgramWait internally;
+    // for raw RAPID we use the load+start sequence which C# manages atomically.
+    const r = await this.bridge.loadRapidProgram(code, allowRealExecution);
+    if (!r.success) throw new Error(String(r.error ?? "executeRapidProgram/load failed"));
+    // LoadRapidProgram in C# already loads, resets pointer, and is ready to start.
+    const r2 = await this.bridge.startRapid(allowRealExecution);
+    if (!r2.success) throw new Error(String(r2.error ?? "executeRapidProgram/start failed"));
   }
 
+  // ── Motion ─────────────────────────────────────────────────────────────────
+
   /**
-   * Generate RAPID code for joint movement
+   * Move robot to absolute joint positions.
+   * Internally uses ABBBridge.MoveToJoints which generates and executes RAPID.
    */
-  generateRapidMoveJoints(joints: number[], speed: number = 100, zone: string = "fine"): string {
-    const jointsStr = joints.map((j, i) => `${j.toFixed(2)}`).join(", ");
-    const speedData = this.formatSpeedData(speed);
-    
-    return `MODULE MainModule
-  PROC main()
-    ! Move to target joint position
-    MoveAbsJ [[${jointsStr}], [9E9, 9E9, 9E9, 9E9, 9E9, 9E9]], ${speedData}, ${zone}, tool0;
-  ENDPROC
-ENDMODULE`;
+  async moveToJoints(
+    joints: number[],
+    speed: number = 100,
+    zone: string = "fine"
+  ): Promise<void> {
+    this._ensureConnected();
+    const r = await this.bridge.moveToJoints(joints, speed, zone);
+    if (!r.success) throw new Error(String(r.error ?? "moveToJoints failed"));
+  }
+
+  /** Alias kept for backward compatibility with abb-robot-tool-actions.ts */
+  async setMotors(_state: "ON" | "OFF"): Promise<void> {
+    // ABB PC SDK does not expose motor state toggle via DefaultUser in most configurations.
+    // Raise a clear error rather than silently failing.
+    throw new Error(
+      "setMotors is not supported via PC SDK DefaultUser credentials. " +
+      "Switch motor state from the controller pendant or FlexPendant."
+    );
+  }
+
+  // ── RAPID code generation helpers ─────────────────────────────────────────
+
+  /**
+   * Generate a RAPID MODULE containing a single MoveAbsJ to the given joints.
+   * Speed is expressed as a speeddata literal to avoid invalid predefined names.
+   */
+  generateRapidMoveJoints(
+    joints: number[],
+    speed: number = 100,
+    zone: string = "fine"
+  ): string {
+    const jointsStr = joints.map(j => j.toFixed(4)).join(", ");
+    const speedData = this._formatSpeedData(speed);
+    return [
+      "MODULE MainModule",
+      "  PROC main()",
+      "    ConfJ \\Off;",
+      "    ConfL \\Off;",
+      `    VAR jointtarget jt := [[${jointsStr}],[9E+09,9E+09,9E+09,9E+09,9E+09,9E+09]];`,
+      `    MoveAbsJ jt, ${speedData}, ${zone}, tool0;`,
+      "    Stop;",
+      "  ENDPROC",
+      "ENDMODULE",
+    ].join("\r\n");
   }
 
   /**
-   * Generate RAPID code for a sequence of movements
+   * Generate a RAPID MODULE for a sequence of MoveAbsJ moves.
+   * All intermediate points use z10; the final point uses fine.
    */
   generateRapidSequence(
     positions: Array<{ joints: number[]; speed?: number; zone?: string }>,
     moduleName: string = "MainModule"
   ): string {
-    const moves = positions.map((pos, i) => {
-      const jointsStr = pos.joints.map(j => j.toFixed(2)).join(", ");
-      const speed = pos.speed || 100;
-      const zone = pos.zone || (i === positions.length - 1 ? "fine" : "z10");
-      const speedData = this.formatSpeedData(speed);
-      return `    MoveAbsJ [[${jointsStr}], [9E9, 9E9, 9E9, 9E9, 9E9, 9E9]], ${speedData}, ${zone}, tool0;`;
-    }).join("\n");
-
-    return `MODULE ${moduleName}
-  PROC main()
-    ! Generated motion sequence
-${moves}
-  ENDPROC
-ENDMODULE`;
+    const declarations: string[] = [];
+    const moves: string[] = [
+      "    ConfJ \\Off;",
+      "    ConfL \\Off;",
+    ];
+    positions.forEach((pos, i) => {
+      const jointsStr = pos.joints.map(j => j.toFixed(4)).join(", ");
+      const speed = pos.speed ?? 100;
+      const zone = pos.zone ?? (i === positions.length - 1 ? "fine" : "z10");
+      declarations.push(
+        `    VAR jointtarget p${i} := [[${jointsStr}],[9E+09,9E+09,9E+09,9E+09,9E+09,9E+09]];`
+      );
+      moves.push(`    MoveAbsJ p${i}, ${this._formatSpeedData(speed)}, ${zone}, tool0;`);
+    });
+    moves.push("    Stop;");
+    return [
+      `MODULE ${moduleName}`,
+      "  PROC main()",
+      ...declarations,
+      ...moves,
+      "  ENDPROC",
+      "ENDMODULE",
+    ].join("\r\n");
   }
 
-  /**
-   * Check if connected
-   */
+  // ── Internals ─────────────────────────────────────────────────────────────
+
   isConnected(): boolean {
-    return this.connected;
+    return this._connected;
   }
 
-  /**
-   * Get system name
-   */
   getSystemName(): string {
-    return this.systemName;
+    return this._systemName;
   }
 
-  private ensureConnected(): void {
-    if (!this.connected) {
+  private _ensureConnected(): void {
+    if (!this._connected) {
       throw new Error("Not connected to controller. Call connect() first.");
     }
   }
 
-  private formatSpeedData(speed: number): string {
+  private _formatSpeedData(speed: number): string {
     const tcp = Math.max(1, Math.min(7000, Number(speed) || 100));
-    return `[${tcp.toFixed(3).replace(/\.0+$/, "").replace(/(\.\d*?)0+$/, "$1")},500,5000,1000]`;
-  }
-
-  /**
-   * Execute a command via C# Bridge
-   * This communicates with actual ABB PC SDK
-   */
-  private async executeCSCommand(command: string, params: Record<string, unknown>): Promise<any> {
-    try {
-      // Try to use C# Bridge for real communication
-      const { ABBCSharpBridge } = await import("./abb-csharp-bridge.js");
-      const bridge = new ABBCSharpBridge();
-      
-      switch (command) {
-        case "connect":
-          return await bridge.connect(String(params.host), Number(params.port) || 7000);
-        case "disconnect":
-          return await bridge.disconnect();
-        case "getStatus":
-          return await bridge.getStatus();
-        case "getJointPositions":
-          const joints = await bridge.getJointPositions();
-          return { success: true, joints };
-        case "moveToJoints":
-          return await bridge.moveToJoints(
-            params.joints as number[],
-            Number(params.speed) || 100,
-            String(params.zone) || "fine"
-          );
-        case "executeRapid":
-          return await bridge.executeRapidProgram(
-            String(params.code),
-            String(params.moduleName) || "MainModule"
-          );
-        case "setMotors":
-          return await bridge.setMotors(String(params.state) as "ON" | "OFF");
-        default:
-          return { success: false, error: `Unknown command: ${command}` };
-      }
-    } catch (error) {
-      // Fallback to mock implementation if C# Bridge not available
-      console.warn("C# Bridge not available, using mock implementation:", error);
-      return this.getMockResponse(command);
-    }
-  }
-
-  /**
-   * Get mock response for development/testing
-   */
-  private getMockResponse(command: string): any {
-    const mockResponses: Record<string, any> = {
-      connect: { success: true, systemName: "IRC5_Controller" },
-      disconnect: { success: true },
-      getStatus: {
-        operationMode: "AUTO",
-        motorState: "ON",
-        rapidRunning: false,
-      },
-      getJointPositions: {
-        joints: [0, 0, 0, 0, 0, 0],
-      },
-      moveToJoints: { success: true },
-      executeRapid: { success: true },
-      loadRapid: { success: true },
-      startRapid: { success: true },
-      stopRapid: { success: true },
-      setMotors: { success: true },
-    };
-
-    return mockResponses[command] || { success: false, error: `Unknown command: ${command}` };
+    return `[${tcp.toFixed(3).replace(/\.?0+$/, "")},500,5000,1000]`;
   }
 }
 
-/**
- * Create and return a new ABB controller instance
- */
+/** Create and return a new ABBController instance. */
 export function createController(config: ControllerConfig): ABBController {
   return new ABBController(config);
 }

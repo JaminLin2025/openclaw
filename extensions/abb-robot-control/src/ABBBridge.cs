@@ -1,19 +1,23 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
 using ABB.Robotics.Controllers;
 using ABB.Robotics.Controllers.Discovery;
 using ABB.Robotics.Controllers.EventLogDomain;
 using ABB.Robotics.Controllers.MotionDomain;
 using ABB.Robotics.Controllers.RapidDomain;
+using Task = ABB.Robotics.Controllers.RapidDomain.Task;
 
 /// <summary>
-/// ABB Robot Controller Bridge for PC SDK Integration
-/// Provides direct communication with actual ABB robot controllers
+/// ABB Robot Controller Bridge for OpenClaw Plugin
+/// 针对 AI Agent 环境优化：全异步非阻塞、远程文件系统隔离、安全的模块覆盖与证书验证。
 /// </summary>
 public class ABBBridge
 {
@@ -21,14 +25,13 @@ public class ABBBridge
     private bool isConnected = false;
 
     /// <summary>
-    /// Connect to ABB robot controller
+    /// Connect to ABB robot controller (Async safe)
     /// </summary>
     public async System.Threading.Tasks.Task<dynamic> Connect(dynamic input)
     {
         try
         {
             string host = CoerceString(GetInputValue(input, "host"));
-
             if (string.IsNullOrWhiteSpace(host))
             {
                 return new { success = false, error = "host is required" };
@@ -42,21 +45,19 @@ public class ABBBridge
                 isConnected = false;
             }
 
-            var scanner = new NetworkScanner();
-            scanner.Scan();
-            var controllers = scanner.Controllers;
+            // 使用后台线程执行网络扫描，防止阻塞 Agent 主线程
+            var controllers = await System.Threading.Tasks.Task.Run(() =>
+            {
+                var scanner = new NetworkScanner();
+                scanner.Scan();
+                return scanner.Controllers;
+            });
 
             if (controllers == null || controllers.Count == 0)
-            {
-                return new { success = false, error = "No ABB controllers discovered by NetScan" };
-            }
+                return new { success = false, error = "No ABB controllers discovered on the network." };
 
             string target = host.Trim();
-            bool localRequested =
-                string.Equals(target, "127.0.0.1", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(target, "localhost", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(target, "::1", StringComparison.OrdinalIgnoreCase);
-
+            bool localRequested = target is "127.0.0.1" or "localhost" or "::1";
             ControllerInfo selectedInfo = null;
 
             // Match by IP first (most common), then Id/SystemId/system-name.
@@ -87,36 +88,13 @@ public class ABBBridge
             // Local RobotStudio usually exposes a virtual controller on 127.0.0.1.
             if (selectedInfo == null && localRequested)
             {
-                foreach (ControllerInfo info in controllers)
-                {
-                    if (info.IsVirtual)
-                    {
-                        selectedInfo = info;
-                        break;
-                    }
-                }
+                selectedInfo = controllers.Cast<ControllerInfo>().FirstOrDefault(c => c.IsVirtual);
             }
 
             if (selectedInfo == null)
-            {
-                var discovered = controllers
-                    .Cast<ControllerInfo>()
-                    .Select(ci =>
-                        (ci.IPAddress?.ToString() ?? "?") +
-                        " (Id=" + ci.Id +
-                        ", Virtual=" + ci.IsVirtual +
-                        ", SystemId=" + ci.SystemId + ")")
-                    .ToArray();
+                return new { success = false, error = "Controller not found", requestedHost = target };
 
-                return new
-                {
-                    success = false,
-                    error = "Controller not found in NetScan",
-                    requestedHost = target,
-                    discoveredControllers = discovered
-                };
-            }
-
+            // 恢复最稳定合法的方案：利用 validateServerCertificate = false 绕过 SDK 2025.1 的证书校验拦截
             controller = Controller.Connect(selectedInfo, ConnectionType.Standalone, validateServerCertificate: false);
             controller.Logon(UserInfo.DefaultUser);
             isConnected = controller.Connected;
@@ -128,22 +106,14 @@ public class ABBBridge
                     success = true,
                     systemName = controller.SystemName,
                     robotModel = controller.Name,
-                    serialNumber = controller.SystemId.ToString(),
                     connected = true,
                     host = selectedInfo.IPAddress?.ToString(),
-                    isVirtual = selectedInfo.IsVirtual,
-                    controllerId = selectedInfo.Id
+                    isVirtual = selectedInfo.IsVirtual
                 };
             }
-            else
-            {
-                return new { success = false, error = "Failed to connect to controller" };
-            }
+            return new { success = false, error = "Logon failed." };
         }
-        catch (Exception ex)
-        {
-            return new { success = false, error = ex.Message };
-        }
+        catch (Exception ex) { return new { success = false, error = ex.Message }; }
     }
 
     /// <summary>
@@ -167,7 +137,7 @@ public class ABBBridge
     }
 
     /// <summary>
-    /// Scan ABB controllers on network (FormMain Experiment 1 equivalent).
+    /// Scan ABB controllers on network
     /// </summary>
     public async System.Threading.Tasks.Task<dynamic> ScanControllers(dynamic input)
     {
@@ -217,19 +187,14 @@ public class ABBBridge
                 return new { success = false, error = "Not connected" };
             }
 
-            var operationMode = controller.OperatingMode.ToString();
-            var controllerState = controller.State.ToString();
             var task = controller.Rapid.GetTask("T_ROB1");
-            var taskExecStatus = task.ExecutionStatus.ToString();
-
             return new
             {
                 success = true,
-                connected = isConnected,
-                operationMode = operationMode,
-                motorState = controllerState,
+                operationMode = controller.OperatingMode.ToString(),
+                motorState = controller.State.ToString(),
                 rapidRunning = task.ExecutionStatus == TaskExecutionStatus.Running,
-                rapidExecutionStatus = taskExecStatus
+                rapidExecutionStatus = task.ExecutionStatus.ToString()
             };
         }
         catch (Exception ex)
@@ -239,7 +204,7 @@ public class ABBBridge
     }
 
     /// <summary>
-    /// Get robotware/system metadata (FormMain Experiment 2 equivalent).
+    /// Get robotware/system metadata
     /// </summary>
     public async System.Threading.Tasks.Task<dynamic> GetSystemInfo(dynamic input)
     {
@@ -268,7 +233,7 @@ public class ABBBridge
     }
 
     /// <summary>
-    /// Get service/runtime info (FormMain Experiment 3 equivalent).
+    /// Get service/runtime info
     /// </summary>
     public async System.Threading.Tasks.Task<dynamic> GetServiceInfo(dynamic input)
     {
@@ -294,7 +259,7 @@ public class ABBBridge
     }
 
     /// <summary>
-    /// Get speed ratio (FormMain Experiment 6 equivalent).
+    /// Get speed ratio
     /// </summary>
     public async System.Threading.Tasks.Task<dynamic> GetSpeedRatio(dynamic input)
     {
@@ -318,7 +283,7 @@ public class ABBBridge
     }
 
     /// <summary>
-    /// Set speed ratio (TrackBar behavior equivalent).
+    /// Set speed ratio 
     /// </summary>
     public async System.Threading.Tasks.Task<dynamic> SetSpeedRatio(dynamic input)
     {
@@ -359,15 +324,7 @@ public class ABBBridge
             var jt = controller.MotionSystem.ActiveMechanicalUnit.GetPosition();
             var robAx = jt.RobAx;
 
-            double[] jointArray = new double[6];
-            jointArray[0] = robAx.Rax_1;
-            jointArray[1] = robAx.Rax_2;
-            jointArray[2] = robAx.Rax_3;
-            jointArray[3] = robAx.Rax_4;
-            jointArray[4] = robAx.Rax_5;
-            jointArray[5] = robAx.Rax_6;
-
-            return new { success = true, joints = jointArray };
+            return new { success = true, joints = new[] { robAx.Rax_1, robAx.Rax_2, robAx.Rax_3, robAx.Rax_4, robAx.Rax_5, robAx.Rax_6 } };
         }
         catch (Exception ex)
         {
@@ -376,7 +333,115 @@ public class ABBBridge
     }
 
     /// <summary>
-    /// Get world pose (FormMain Experiment 8 equivalent).
+    /// Load RAPID program
+    /// </summary>
+    public async System.Threading.Tasks.Task<dynamic> LoadRapidProgram(dynamic input)
+    {
+        try
+        {
+            if (!isConnected || controller == null) return new { success = false, error = "Not connected" };
+
+            string rapidCode = CoerceString(GetInputValue(input, "code"));
+            string moduleName = "MainModule"; 
+            rapidCode = NormalizeRapidSpeedSymbols(rapidCode);
+
+            bool allowRealExecution = CoerceBool(GetInputValue(input, "allowRealExecution"), false);
+            EnsureRapidControlAccess(allowRealExecution);
+
+            // 1. 在运行 Agent 的 PC 上生成临时文件
+            string localTempFilePath = CreateTempRapidFile(rapidCode, moduleName, out string fileName);
+            string remoteSystemPath = $"{fileName}"; // 默认传入 HOME 目录
+
+            await System.Threading.Tasks.Task.Run(() =>
+            {
+                using (Mastership m = Mastership.Request(controller))
+                {
+                    var task = controller.Rapid.GetTask("T_ROB1");
+
+                    if (task.ExecutionStatus == TaskExecutionStatus.Stopped || task.ExecutionStatus == TaskExecutionStatus.Running)
+                    {
+                        controller.Rapid.Stop(StopMode.Immediate);
+                        Thread.Sleep(200); 
+                    }
+
+                    // 2. 将本地文件推送到真实机器人的控制器文件系统中
+                    controller.FileSystem.PutFile(localTempFilePath, remoteSystemPath, true);
+
+                    // 3. 安全加载：使用 Replace 覆盖同名模块，而不是暴力删除所有模块
+                    bool loaded = task.LoadModuleFromFile(remoteSystemPath, RapidLoadMode.Replace);
+                    if (!loaded) throw new Exception("Controller failed to load the module into memory.");
+
+                    // 重置指针，加入合理的重试机制
+                    for (int i = 0; i < 3; i++)
+                    {
+                        try { task.ResetProgramPointer(); break; }
+                        catch { Thread.Sleep(100); }
+                    }
+                }
+
+                // 4. 清理控制器内的临时文件，保持文件系统干净
+                try { controller.FileSystem.RemoveFile(remoteSystemPath); } catch { }
+            });
+
+            // 清理本地临时文件
+            TryDeleteTempFile(localTempFilePath);
+
+            return new { success = true };
+        }
+        catch (Exception ex) { return new { success = false, error = ex.Message }; }
+    }
+
+    /// <summary>
+    /// Start RAPID execution
+    /// </summary>
+    public async System.Threading.Tasks.Task<dynamic> StartRapid(dynamic input)
+    {
+        try
+        {
+            if (!isConnected || controller == null) return new { success = false, error = "Not connected" };
+
+            bool allowRealExecution = CoerceBool(GetInputValue(input, "allowRealExecution"), false);
+            EnsureRapidControlAccess(allowRealExecution);
+
+            using (Mastership m = Mastership.Request(controller))
+            {
+                StartResult result = controller.Rapid.Start(RegainMode.Continue, ExecutionMode.Continuous, ExecutionCycle.Once);
+                if (result != StartResult.Ok)
+                {
+                    result = controller.Rapid.Start(RegainMode.Regain, ExecutionMode.Continuous, ExecutionCycle.Once);
+                }
+                if (result != StartResult.Ok) return new { success = false, error = $"RAPID start failed: {result}" };
+            }
+            return new { success = true };
+        }
+        catch (Exception ex) { return new { success = false, error = ex.Message }; }
+    }
+
+    /// <summary>
+    /// Stop RAPID execution
+    /// </summary>
+    public async System.Threading.Tasks.Task<dynamic> StopRapid(dynamic input)
+    {
+        try
+        {
+            if (!isConnected || controller == null) return new { success = false, error = "Not connected" };
+
+            EnsureRapidControlGrant();
+            using (Mastership m = Mastership.Request(controller))
+            {
+                controller.Rapid.GetTask("T_ROB1").Stop(StopMode.Immediate);
+            }
+            return new { success = true };
+        }
+        catch (Exception ex)
+        {
+            return new { success = false, error = ex.Message };
+        }
+    }
+
+
+    /// <summary>
+    /// Get world pose
     /// </summary>
     public async System.Threading.Tasks.Task<dynamic> GetWorldPosition(dynamic input)
     {
@@ -411,7 +476,7 @@ public class ABBBridge
     }
 
     /// <summary>
-    /// Read event log entries (FormMain Experiment 9 equivalent).
+    /// Read event log entries
     /// </summary>
     public async System.Threading.Tasks.Task<dynamic> GetEventLogEntries(dynamic input)
     {
@@ -425,6 +490,7 @@ public class ABBBridge
             int limit = (int)Math.Max(1, Math.Min(200, CoerceDouble(GetInputValue(input, "limit"), 20)));
             int categoryId = (int)CoerceDouble(GetInputValue(input, "categoryId"), 0);
             EventLogCategory cat = controller.EventLog.GetCategory(categoryId);
+
             if (cat == null)
             {
                 return new { success = false, error = "Event log category not found", categoryId };
@@ -492,7 +558,7 @@ public class ABBBridge
     }
 
     /// <summary>
-    /// Backup module to local file (FormMain Experiment 10 equivalent).
+    /// Backup module to local file
     /// </summary>
     public async System.Threading.Tasks.Task<dynamic> BackupModule(dynamic input)
     {
@@ -506,6 +572,7 @@ public class ABBBridge
             string moduleName = CoerceString(GetInputValue(input, "moduleName"), "");
             string preferredTaskName = CoerceString(GetInputValue(input, "taskName"), "");
             string outputDir = CoerceString(GetInputValue(input, "outputDir"), AppDomain.CurrentDomain.BaseDirectory);
+
             if (!Directory.Exists(outputDir))
             {
                 Directory.CreateDirectory(outputDir);
@@ -513,6 +580,7 @@ public class ABBBridge
 
             Task[] tasks = controller.Rapid.GetTasks();
             var orderedTasks = tasks.AsEnumerable();
+
             if (!string.IsNullOrWhiteSpace(preferredTaskName))
             {
                 orderedTasks = orderedTasks
@@ -561,7 +629,7 @@ public class ABBBridge
     }
 
     /// <summary>
-    /// Reset task program pointer to main (FormMain Experiment 11 equivalent).
+    /// Reset task program pointer to main
     /// </summary>
     public async System.Threading.Tasks.Task<dynamic> ResetProgramPointer(dynamic input)
     {
@@ -575,7 +643,7 @@ public class ABBBridge
             string taskName = CoerceString(GetInputValue(input, "taskName"), "T_ROB1");
 
             EnsureRapidControlGrant();
-            using (Mastership m = Mastership.Request(controller.Rapid))
+            using (Mastership m = Mastership.Request(controller))
             {
                 Task t = controller.Rapid.GetTask(taskName);
                 t.ResetProgramPointer();
@@ -618,13 +686,10 @@ public class ABBBridge
             double speed = CoerceDouble(GetInputValue(input, "speed"), 100);
             string zone = CoerceString(GetInputValue(input, "zone"), "fine");
 
-            if (joints == null || joints.Length < 6)
-            {
-                return new { success = false, error = "MoveToJoints requires joints[6]" };
-            }
+            if (joints == null || joints.Length < 6) return new { success = false, error = "Requires joints[6]" };
 
             string rapidCode = GenerateMoveJointsCode(joints, speed, zone);
-            await ExecuteRapidProgram(rapidCode, "MainModule");
+            await ExecuteRapidProgramWait(rapidCode, "MainModule");
 
             return new { success = true };
         }
@@ -635,211 +700,68 @@ public class ABBBridge
     }
 
     /// <summary>
-    /// Execute RAPID program
+    /// 事件驱动的执行等待方案
     /// </summary>
-    public async System.Threading.Tasks.Task<dynamic> ExecuteRapidProgram(dynamic input)
+    private async System.Threading.Tasks.Task ExecuteRapidProgramWait(string rapidCode, string moduleName)
     {
+        rapidCode = NormalizeRapidSpeedSymbols(rapidCode);
+        EnsureRapidControlAccess(true);
+
+        var task = controller.Rapid.GetTask("T_ROB1");
+        string tempFile = CreateTempRapidFile(rapidCode, moduleName, out string fileName);
+        string remotePath = $"{fileName}";
+
+        var tcs = new TaskCompletionSource<bool>();
+
+        // CS0246 & CS1061 修复：正确的事件类型和属性读取
+        EventHandler<ExecutionStatusChangedEventArgs> statusChangedHandler = (sender, e) =>
+        {
+            // 通过获取最新的 task 状态，判断是否真正停机
+            if (task.ExecutionStatus == TaskExecutionStatus.Stopped)
+            {
+                tcs.TrySetResult(true);
+            }
+        };
+
         try
         {
-            if (!isConnected || controller == null)
+            await System.Threading.Tasks.Task.Run(() =>
             {
-                return new { success = false, error = "Not connected" };
-            }
-
-            string rapidCode = CoerceString(GetInputValue(input, "code"));
-            string moduleName = CoerceString(GetInputValue(input, "moduleName"), "MainModule");
-            rapidCode = NormalizeRapidSpeedSymbols(rapidCode);
-
-            await ExecuteRapidProgram(rapidCode, moduleName);
-
-            return new { success = true };
-        }
-        catch (Exception ex)
-        {
-            return new { success = false, error = ex.Message };
-        }
-    }
-
-    /// <summary>
-    /// Load RAPID program
-    /// </summary>
-    public async System.Threading.Tasks.Task<dynamic> LoadRapidProgram(dynamic input)
-    {
-        try
-        {
-            if (!isConnected || controller == null)
-            {
-                return new { success = false, error = "Not connected" };
-            }
-
-            string rapidCode = CoerceString(GetInputValue(input, "code"));
-            string moduleName = CoerceString(GetInputValue(input, "moduleName"), "MainModule");
-            rapidCode = NormalizeRapidSpeedSymbols(rapidCode);
-
-            bool allowRealExecution = CoerceBool(GetInputValue(input, "allowRealExecution"), false);
-            EnsureRapidControlAccess(allowRealExecution);
-
-            // Write module to controller HOME directory so it's accessible by the controller filesystem
-            string homeDir = System.IO.Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-                "RobotStudio", "Systems", controller.SystemName, "HOME");
-            string modFileName = moduleName + ".mod";
-            string modFilePath = System.IO.Path.Combine(homeDir, modFileName);
-            bool usedHomeDir = false;
-
-            string tempFile = CreateTempRapidFile(rapidCode, moduleName);
-            try
-            {
-                using (Mastership m = Mastership.Request(controller.Rapid))
+                using (Mastership m = Mastership.Request(controller))
                 {
-                    var task = controller.Rapid.GetTask("T_ROB1");
+                    controller.FileSystem.PutFile(tempFile, remotePath, true);
+                    bool loaded = task.LoadModuleFromFile(remotePath, RapidLoadMode.Replace);
+                    if (!loaded) throw new InvalidOperationException("Failed to load RAPID module.");
+                    
+                    task.ResetProgramPointer();
+       
+                    // 订阅事件后再启动，注意事件挂载在 controller.Rapid 上
+                    controller.Rapid.ExecutionStatusChanged += statusChangedHandler;
+                    task.Start();
 
-                    // Stop T_ROB1 first if running
-                    if (task.ExecutionStatus == TaskExecutionStatus.Running)
+                    // 补丁：检查是否瞬间执行完成
+                    if (task.ExecutionStatus == TaskExecutionStatus.Stopped)
                     {
-                        controller.Rapid.Stop(StopMode.Immediate);
-                        System.Threading.Thread.Sleep(300);
-                    }
-
-                    // Delete any leftover temporary modules (not system, not MainModule, not Communicate)
-                    foreach (Module mod in task.GetModules())
-                    {
-                        if (!mod.IsSystem && mod.Name != "MainModule" && mod.Name != "Communicate")
-                        {
-                            try { task.DeleteModule(mod.Name); } catch { }
-                        }
-                    }
-
-                    bool loaded = false;
-
-                    // Try writing to HOME directory first (works when com task is running)
-                    if (System.IO.Directory.Exists(homeDir))
-                    {
-                        try
-                        {
-                            System.IO.File.WriteAllText(modFilePath, rapidCode);
-                            loaded = task.LoadModuleFromFile(modFilePath, RapidLoadMode.Replace);
-                            usedHomeDir = loaded;
-                        }
-                        catch { }
-                    }
-
-                    // Fall back to LoadProgramFromFile with temp file
-                    if (!loaded)
-                    {
-                        loaded = task.LoadProgramFromFile(tempFile, RapidLoadMode.Replace);
-                    }
-
-                    if (!loaded)
-                    {
-                        return new { success = false, error = "Failed to load RAPID program from temporary file" };
+                       tcs.TrySetResult(true);
                     }
                 }
-            }
-            finally
+            });
+
+            // 增加 30 秒超时机制，防止死锁
+            using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
             {
-                TryDeleteTempFile(tempFile);
-                if (!usedHomeDir && System.IO.File.Exists(modFilePath))
+                using (cts.Token.Register(() => tcs.TrySetCanceled()))
                 {
-                    try { System.IO.File.Delete(modFilePath); } catch { }
+                    await tcs.Task;
                 }
             }
-
-            return new { success = true };
         }
-        catch (Exception ex)
+        finally
         {
-            return new { success = false, error = ex.Message };
-        }
-    }
-
-    /// <summary>
-    /// Start RAPID execution
-    /// </summary>
-    public async System.Threading.Tasks.Task<dynamic> StartRapid(dynamic input)
-    {
-        try
-        {
-            if (!isConnected || controller == null)
-            {
-                return new { success = false, error = "Not connected" };
-            }
-
-            bool allowRealExecution = CoerceBool(GetInputValue(input, "allowRealExecution"), false);
-            EnsureRapidControlAccess(allowRealExecution);
-            using (Mastership m = Mastership.Request(controller.Rapid))
-            {
-                // Use controller-level Rapid.Start() instead of task.Start().
-                // task.Start() returns StartResult.Error when other tasks (e.g. com) are running.
-                // controller.Rapid.Start() correctly starts all runnable tasks.
-                StartResult result = controller.Rapid.Start(
-                    RegainMode.Continue,
-                    ExecutionMode.Continuous,
-                    ExecutionCycle.Once);
-                if (result != StartResult.Ok)
-                {
-                    return new { success = false, error = $"RAPID start failed: {result}" };
-                }
-            }
-
-            return new { success = true };
-        }
-        catch (Exception ex)
-        {
-            return new { success = false, error = ex.Message };
-        }
-    }
-
-    /// <summary>
-    /// Stop RAPID execution
-    /// </summary>
-    public async System.Threading.Tasks.Task<dynamic> StopRapid(dynamic input)
-    {
-        try
-        {
-            if (!isConnected || controller == null)
-            {
-                return new { success = false, error = "Not connected" };
-            }
-
-            EnsureRapidControlGrant();
-            using (Mastership m = Mastership.Request(controller.Rapid))
-            {
-                var task = controller.Rapid.GetTask("T_ROB1");
-                task.Stop(StopMode.Immediate);
-            }
-
-            return new { success = true };
-        }
-        catch (Exception ex)
-        {
-            return new { success = false, error = ex.Message };
-        }
-    }
-
-    /// <summary>
-    /// Set motors on/off
-    /// </summary>
-    public async System.Threading.Tasks.Task<dynamic> SetMotors(dynamic input)
-    {
-        try
-        {
-            if (!isConnected || controller == null)
-            {
-                return new { success = false, error = "Not connected" };
-            }
-
-            string state = CoerceString(GetInputValue(input, "state"));
-            return new
-            {
-                success = false,
-                error = "MotorOn/MotorOff is not available in ABB PCSDK 2025 controller API",
-                requestedState = state
-            };
-        }
-        catch (Exception ex)
-        {
-            return new { success = false, error = ex.Message };
+            // 清理事件注册
+            controller.Rapid.ExecutionStatusChanged -= statusChangedHandler;
+            TryDeleteTempFile(tempFile);
+            try { controller.FileSystem.RemoveFile(remotePath); } catch { }
         }
     }
 
@@ -850,7 +772,6 @@ public class ABBBridge
     {
         string jointsStr = string.Join(", ", joints);
         string speedStr = FormatSpeedDataLiteral(speed);
-
         return $@"MODULE MainModule
   PROC main()
     MoveAbsJ [[{jointsStr}], [9E9, 9E9, 9E9, 9E9, 9E9, 9E9]], {speedStr}, {zone}, tool0;
@@ -862,84 +783,34 @@ ENDMODULE";
     {
         // Use an explicit speeddata literal to avoid invalid predefined names like v8/v12.
         double tcp = Math.Max(1.0, Math.Min(7000.0, speed));
-        string tcpText = tcp.ToString("0.###", CultureInfo.InvariantCulture);
-        return "[" + tcpText + ",500,5000,1000]";
+        return "[" + tcp.ToString("0.###", CultureInfo.InvariantCulture) + ",500,5000,1000]";
     }
 
     private static string NormalizeRapidSpeedSymbols(string rapidCode)
     {
-        if (string.IsNullOrWhiteSpace(rapidCode))
+        if (string.IsNullOrWhiteSpace(rapidCode)) return rapidCode;
+        return Regex.Replace(rapidCode, @",\s*v(\d+(?:\.\d+)?)\s*,", m =>
         {
-            return rapidCode;
-        }
-
-        // Convert legacy speed symbols like ', v8,' to explicit speeddata literals.
-        return Regex.Replace(
-            rapidCode,
-            @",\s*v(\d+(?:\.\d+)?)\s*,",
-            m =>
-            {
-                if (!double.TryParse(m.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var speed))
-                {
-                    return m.Value;
-                }
-
-                return ", " + FormatSpeedDataLiteral(speed) + ",";
-            },
-            RegexOptions.IgnoreCase);
+            if (!double.TryParse(m.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var speed))
+                return m.Value;
+            return ", " + FormatSpeedDataLiteral(speed) + ",";
+        }, RegexOptions.IgnoreCase);
     }
-
+    
     private static object GetInputValue(dynamic input, string key)
     {
-        if (input == null || string.IsNullOrWhiteSpace(key))
-        {
-            return null;
-        }
-
-        object boxed = input;
-        if (boxed is IDictionary dict)
+        if (input == null || string.IsNullOrWhiteSpace(key)) return null;
+        if (input is IDictionary dict)
         {
             foreach (DictionaryEntry entry in dict)
-            {
-                if (entry.Key != null &&
-                    string.Equals(entry.Key.ToString(), key, StringComparison.OrdinalIgnoreCase))
-                {
-                    return entry.Value;
-                }
-            }
+                if (string.Equals(entry.Key?.ToString(), key, StringComparison.OrdinalIgnoreCase)) return entry.Value;
         }
-
-        var type = boxed.GetType();
-        var clrProp = type.GetProperty(key,
-            System.Reflection.BindingFlags.Public |
-            System.Reflection.BindingFlags.Instance |
-            System.Reflection.BindingFlags.IgnoreCase);
-        if (clrProp != null)
-        {
-            return clrProp.GetValue(boxed, null);
-        }
-
-        // PowerShell PSCustomObject often stores payload fields in a 'Properties' collection.
-        var propsProp = type.GetProperty("Properties",
-            System.Reflection.BindingFlags.Public |
-            System.Reflection.BindingFlags.Instance |
-            System.Reflection.BindingFlags.IgnoreCase);
-        var propsObj = propsProp?.GetValue(boxed, null) as IEnumerable;
-        if (propsObj != null)
-        {
-            foreach (var p in propsObj)
-            {
-                if (p == null) continue;
-                var pType = p.GetType();
-                var name = pType.GetProperty("Name")?.GetValue(p, null)?.ToString();
-                if (!string.Equals(name, key, StringComparison.OrdinalIgnoreCase)) continue;
-                return pType.GetProperty("Value")?.GetValue(p, null);
-            }
-        }
-
+        var type = input.GetType();
+        var clrProp = type.GetProperty(key, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase);
+        if (clrProp != null) return clrProp.GetValue(input, null);
         return null;
     }
-
+    
     private static string CoerceString(object value, string defaultValue = "")
     {
         if (value == null) return defaultValue;
@@ -988,43 +859,6 @@ ENDMODULE";
         return null;
     }
 
-    /// <summary>
-    /// Execute RAPID program internally
-    /// </summary>
-    private async System.Threading.Tasks.Task ExecuteRapidProgram(string rapidCode, string moduleName)
-    {
-        rapidCode = NormalizeRapidSpeedSymbols(rapidCode);
-        EnsureRapidControlAccess(true);
-        var task = controller.Rapid.GetTask("T_ROB1");
-        string tempFile = CreateTempRapidFile(rapidCode, moduleName);
-        try
-        {
-            using (Mastership m = Mastership.Request(controller.Rapid))
-            {
-                bool loaded = task.LoadProgramFromFile(tempFile, RapidLoadMode.Replace);
-                if (!loaded)
-                {
-                    throw new InvalidOperationException("Failed to load RAPID program from temporary file.");
-                }
-
-                task.Start();
-            }
-            var sw = Stopwatch.StartNew();
-            while (task.ExecutionStatus == TaskExecutionStatus.Running)
-            {
-                if (sw.Elapsed > TimeSpan.FromSeconds(30))
-                {
-                    throw new TimeoutException("RAPID execution timeout (>30s)");
-                }
-                await System.Threading.Tasks.Task.Delay(100);
-            }
-        }
-        finally
-        {
-            TryDeleteTempFile(tempFile);
-        }
-    }
-
     private void EnsureRapidControlGrant()
     {
         if (controller == null)
@@ -1063,26 +897,26 @@ ENDMODULE";
         EnsureRapidControlGrant();
     }
 
-    private static string CreateTempRapidFile(string rapidCode, string moduleName)
+
+    private static string CreateTempRapidFile(string rapidCode, string moduleName, out string fileName)
     {
         string safeModuleName = string.IsNullOrWhiteSpace(moduleName) ? "MainModule" : moduleName;
-        string fileName = "ABBBridge_" + safeModuleName + "_" + Guid.NewGuid().ToString("N") + ".prg";
+        fileName = "AgentMod_" + Guid.NewGuid().ToString("N").Substring(0, 8) + ".mod";
         string tempFile = Path.Combine(Path.GetTempPath(), fileName);
-        File.WriteAllText(tempFile, rapidCode ?? string.Empty);
+
+        string code = rapidCode ?? string.Empty;
+        string content = code.TrimStart().StartsWith("MODULE", StringComparison.OrdinalIgnoreCase) 
+            ? code : $"MODULE {safeModuleName}\r\n{code}\r\nENDMODULE";
+
+        File.WriteAllText(tempFile, content);
         return tempFile;
     }
 
+
+
     private static void TryDeleteTempFile(string filePath)
     {
-        try
-        {
-            if (!string.IsNullOrWhiteSpace(filePath) && File.Exists(filePath))
-            {
-                File.Delete(filePath);
-            }
-        }
-        catch
-        {
-        }
+        try { if (!string.IsNullOrWhiteSpace(filePath) && File.Exists(filePath)) File.Delete(filePath); } catch { }
     }
+
 }

@@ -1,6 +1,7 @@
 /**
  * abb-robot-tool-actions.ts
- * Action handlers for ABB robot tool
+ * Action handlers for the ABB robot tool.
+ * Covers all actions registered in abb-robot-tool.ts.
  */
 
 import type { ABBController } from "./abb-controller.js";
@@ -41,7 +42,11 @@ function clamp(n: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, n));
 }
 
-function equalJoints(a: number[] | null | undefined, b: number[] | null | undefined, epsilon = 1e-3): boolean {
+function equalJoints(
+  a: number[] | null | undefined,
+  b: number[] | null | undefined,
+  epsilon = 1e-3
+): boolean {
   if (!a || !b || a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {
     if (Math.abs((a[i] ?? 0) - (b[i] ?? 0)) > epsilon) return false;
@@ -71,24 +76,30 @@ function interpolateJoints(
     } else if (mode === "cosine") {
       t = (1 - Math.cos(Math.PI * tRaw)) / 2;
     }
-    out.push(to.map((target, idx) => {
-      const start = from[idx] ?? 0;
-      return start + (target - start) * t;
-    }));
+    out.push(
+      to.map((target, idx) => {
+        const start = from[idx] ?? 0;
+        return start + (target - start) * t;
+      })
+    );
   }
   return out;
 }
 
-function pushHistory(motionState: MotionState, joints: number[], source: string): void {
+function pushHistory(
+  motionState: MotionState,
+  joints: number[],
+  source: string
+): void {
   motionState.lastTarget = [...joints];
   motionState.history.push({
     timestamp: new Date().toISOString(),
     joints: [...joints],
     source,
   });
-  const maxHistory = 200;
-  if (motionState.history.length > maxHistory) {
-    motionState.history.splice(0, motionState.history.length - maxHistory);
+  const MAX_HISTORY = 200;
+  if (motionState.history.length > MAX_HISTORY) {
+    motionState.history.splice(0, motionState.history.length - MAX_HISTORY);
   }
 }
 
@@ -104,25 +115,11 @@ function buildTemplatePoints(
   const setIf = (idx: number, delta: number) => {
     if (idx >= 0 && idx < b.length) b[idx] = (home[idx] ?? 0) + delta * amp;
   };
-
   switch (template) {
-    case "wave":
-      setIf(0, 25);
-      setIf(3, 18);
-      setIf(5, -20);
-      break;
-    case "bounce":
-      setIf(1, -22);
-      setIf(2, 18);
-      break;
-    case "sway":
-      setIf(0, -20);
-      setIf(4, 15);
-      break;
-    case "twist":
-      setIf(3, 28);
-      setIf(5, 32);
-      break;
+    case "wave":   setIf(0, 25); setIf(3, 18); setIf(5, -20); break;
+    case "bounce": setIf(1, -22); setIf(2, 18); break;
+    case "sway":   setIf(0, -20); setIf(4, 15); break;
+    case "twist":  setIf(3, 28); setIf(5, 32); break;
     default:
       throw new Error(`Unknown dance template: ${template}. Available: wave, bounce, sway, twist`);
   }
@@ -135,36 +132,17 @@ async function executeContinuousDance(
   motionState: MotionState,
   options: DanceExecutionOptions
 ): Promise<{
-  repeat: number;
-  speed: number;
-  maxJointStep: number;
-  minSamples: number;
-  interpolation: InterpolationMode;
-  waypoints: number;
-  start: number[];
-  end: number[];
-  moduleName: string;
+  repeat: number; speed: number; maxJointStep: number; minSamples: number;
+  interpolation: InterpolationMode; waypoints: number;
+  start: number[]; end: number[]; moduleName: string;
 }> {
-  const {
-    pointA,
-    pointB,
-    repeat,
-    speed,
-    maxJointStep,
-    minSamples,
-    interpolation,
-    autoConnect,
-    returnToA,
-    moduleName,
-    source,
-  } = options;
+  const { pointA, pointB, repeat, speed, maxJointStep, minSamples,
+    interpolation, autoConnect, returnToA, moduleName, source } = options;
 
   let continuityFrom: number[] | null = null;
   if (autoConnect) {
     continuityFrom = motionState.lastTarget ? [...motionState.lastTarget] : null;
-    if (!continuityFrom) {
-      continuityFrom = await controller.getJointPositions();
-    }
+    if (!continuityFrom) continuityFrom = await controller.getJointPositions();
   }
 
   const waypoints: number[][] = [];
@@ -188,31 +166,25 @@ async function executeContinuousDance(
     cursor = pointA;
   }
 
-  if (waypoints.length === 0) {
-    throw new Error("No motion generated; points are identical and no continuity segment is needed");
-  }
+  if (waypoints.length === 0)
+    throw new Error("No motion generated; points are identical and no continuity segment needed");
 
   const rapidPoints = waypoints.map((joints, idx) => ({
-    joints,
-    speed,
-    zone: idx === waypoints.length - 1 ? "fine" : "z10",
+    joints, speed, zone: idx === waypoints.length - 1 ? "fine" : "z10",
   }));
   const rapidCode = controller.generateRapidSequence(rapidPoints, moduleName);
   await controller.executeRapidProgram(rapidCode, moduleName);
-
   pushHistory(motionState, cursor, source);
 
-  return {
-    repeat,
-    speed,
-    maxJointStep,
-    minSamples,
-    interpolation,
-    waypoints: waypoints.length,
-    start: pointA,
-    end: cursor,
-    moduleName,
-  };
+  return { repeat, speed, maxJointStep, minSamples, interpolation,
+    waypoints: waypoints.length, start: pointA, end: cursor, moduleName };
+}
+
+function speedToRapidConst(speed: number): string {
+  if (speed <= 10) return "v10";
+  if (speed <= 20) return "v20";
+  if (speed <= 50) return "v50";
+  return "v100";
 }
 
 export async function handleAction(
@@ -226,552 +198,379 @@ export async function handleAction(
   motionState: MotionState
 ): Promise<any> {
 
-  // Disconnect
   if (action === "disconnect") {
-    if (!controller?.isConnected()) {
-      return errorResult("Not connected to any controller");
-    }
+    if (!controller?.isConnected()) return errorResult("Not connected");
     try {
       await controller.disconnect();
-      return {
-        content: [{ type: "text" as const, text: "✓ Disconnected from controller" }],
-        details: { connected: false },
-      };
-    } catch (err) {
-      return errorResult(`Disconnect failed: ${String(err)}`);
-    }
+      return { content: [{ type: "text" as const, text: "✓ Disconnected" }], details: { connected: false } };
+    } catch (err) { return errorResult(`Disconnect failed: ${String(err)}`); }
   }
 
-  // Get status
   if (action === "get_status") {
-    if (!controller?.isConnected()) {
-      return {
-        content: [{ type: "text" as const, text: "Not connected to any controller" }],
-        details: { connected: false },
-      };
-    }
+    if (!controller?.isConnected())
+      return { content: [{ type: "text" as const, text: "Not connected" }], details: { connected: false } };
     try {
-      const status = await controller.getStatus();
-      const text = `Controller Status:\n` +
-                  `  Connected: ${status.connected}\n` +
-                  `  System: ${status.systemName}\n` +
-                  `  Operation Mode: ${status.operationMode}\n` +
-                  `  Motors: ${status.motorState}\n` +
-                  `  RAPID Running: ${status.rapidRunning}`;
-      return { content: [{ type: "text" as const, text }], details: status };
-    } catch (err) {
-      return errorResult(`Failed to get status: ${String(err)}`);
-    }
+      const s = await controller.getStatus();
+      return { content: [{ type: "text" as const, text:
+        `Status:\n  Mode: ${s.operationMode}\n  Motors: ${s.motorState}\n  RAPID: ${s.rapidRunning} (${s.rapidExecutionStatus})` }],
+        details: s };
+    } catch (err) { return errorResult(`get_status failed: ${String(err)}`); }
   }
 
-  // Get joints
+  if (action === "get_system_info") {
+    if (!controller?.isConnected()) return errorResult("Not connected");
+    try {
+      const info = await controller.getSystemInfo();
+      return { content: [{ type: "text" as const, text:
+        `System: ${info.systemName}\n  Controller: ${info.controllerName}\n  RobotWare: ${info.robotWareName} v${info.robotWareVersion}\n  Virtual: ${info.isVirtual}` }],
+        details: info };
+    } catch (err) { return errorResult(`get_system_info failed: ${String(err)}`); }
+  }
+
+  if (action === "get_service_info") {
+    if (!controller?.isConnected()) return errorResult("Not connected");
+    try {
+      const info = await controller.getServiceInfo();
+      return { content: [{ type: "text" as const, text:
+        `Service Info:\n  Production Hours: ${info.elapsedProductionHours}\n  Last Start: ${info.lastStart}` }],
+        details: info };
+    } catch (err) { return errorResult(`get_service_info failed: ${String(err)}`); }
+  }
+
+  if (action === "get_speed") {
+    if (!controller?.isConnected()) return errorResult("Not connected");
+    try {
+      const ratio = await controller.getSpeedRatio();
+      return { content: [{ type: "text" as const, text: `Speed ratio: ${ratio}%` }], details: { speedRatio: ratio } };
+    } catch (err) { return errorResult(`get_speed failed: ${String(err)}`); }
+  }
+
+  if (action === "set_speed") {
+    if (!controller?.isConnected()) return errorResult("Not connected");
+    const speed = clamp(Number(params["speed"] ?? 100), 1, 100);
+    try {
+      const ratio = await controller.setSpeedRatio(speed);
+      return { content: [{ type: "text" as const, text: `✓ Speed ratio set to ${ratio}%` }], details: { speedRatio: ratio } };
+    } catch (err) { return errorResult(`set_speed failed: ${String(err)}`); }
+  }
+
   if (action === "get_joints") {
-    if (!controller?.isConnected()) {
-      return errorResult("Not connected. Use 'connect' action first.");
-    }
+    if (!controller?.isConnected()) return errorResult("Not connected. Use 'connect' first.");
     try {
       const joints = await controller.getJointPositions();
       const cfg = currentConfig || getCfg("abb-crb-15000");
-      const lines = cfg.joints.map((j, i) =>
-        `  ${j.label ?? j.id}: ${(joints[i] ?? 0).toFixed(2)}° [${j.min}…${j.max}]`
-      );
-      return {
-        content: [{ type: "text" as const, text: `Current Joint Positions:\n${lines.join("\n")}` }],
-        details: { joints },
-      };
-    } catch (err) {
-      return errorResult(`Failed to get joints: ${String(err)}`);
-    }
+      const lines = cfg.joints.map((j, i) => `  ${j.label ?? j.id}: ${(joints[i] ?? 0).toFixed(2)}\u00b0 [${j.min}\u2026${j.max}]`);
+      return { content: [{ type: "text" as const, text: `Joint Positions:\n${lines.join("\n")}` }], details: { joints } };
+    } catch (err) { return errorResult(`get_joints failed: ${String(err)}`); }
   }
 
-  // Set joints
+  if (action === "get_world_position") {
+    if (!controller?.isConnected()) return errorResult("Not connected");
+    try {
+      const p = await controller.getWorldPosition();
+      return { content: [{ type: "text" as const, text:
+        `World Pos (mm/deg):\n  X:${p.x.toFixed(2)} Y:${p.y.toFixed(2)} Z:${p.z.toFixed(2)}\n  Rx:${p.rx.toFixed(2)} Ry:${p.ry.toFixed(2)} Rz:${p.rz.toFixed(2)}` }],
+        details: p };
+    } catch (err) { return errorResult(`get_world_position failed: ${String(err)}`); }
+  }
+
+  if (action === "get_event_log") {
+    if (!controller?.isConnected()) return errorResult("Not connected");
+    const categoryId = Number(params["category_id"] ?? params["categoryId"] ?? 0);
+    const limit = clamp(Number(params["limit"] ?? 20), 1, 200);
+    try {
+      const result = await controller.getEventLogEntries(categoryId, limit) as any;
+      if (!result.success) return errorResult(String(result.error ?? "get_event_log failed"));
+      const lines = (result.entries as any[]).map(
+        (e) => `  [${e.type}] ${String(e.timestamp).slice(0, 19)} #${e.number}: ${e.title}`
+      );
+      return { content: [{ type: "text" as const, text: `Event Log (cat ${categoryId}):\n${lines.join("\n")}` }], details: result };
+    } catch (err) { return errorResult(`get_event_log failed: ${String(err)}`); }
+  }
+
+  if (action === "list_tasks") {
+    if (!controller?.isConnected()) return errorResult("Not connected");
+    try {
+      const result = await controller.listTasks() as any;
+      if (!result.success) return errorResult(String(result.error ?? "list_tasks failed"));
+      const lines = (result.tasks as any[]).map(
+        (t) => `  \u2022 ${t.taskName} [${t.executionStatus}] \u2014 ${t.modules.join(", ")}`
+      );
+      return { content: [{ type: "text" as const, text: `RAPID Tasks (${result.count}):\n${lines.join("\n")}` }], details: result };
+    } catch (err) { return errorResult(`list_tasks failed: ${String(err)}`); }
+  }
+
+  if (action === "backup_module") {
+    if (!controller?.isConnected()) return errorResult("Not connected");
+    const moduleName = String(params["module_name"] ?? params["moduleName"] ?? "");
+    const taskName   = String(params["task_name"]   ?? params["taskName"]   ?? "");
+    const outputDir  = String(params["output_dir"]  ?? params["outputDir"]  ?? ".");
+    try {
+      const result = await controller.backupModule(moduleName, taskName, outputDir) as any;
+      if (!result.success) return errorResult(String(result.error ?? "backup_module failed"));
+      return { content: [{ type: "text" as const, text: `\u2713 Backed up '${result.moduleName}' to ${result.outputDir}` }], details: result };
+    } catch (err) { return errorResult(`backup_module failed: ${String(err)}`); }
+  }
+
+  if (action === "reset_program_pointer") {
+    if (!controller?.isConnected()) return errorResult("Not connected");
+    const taskName = String(params["task_name"] ?? params["taskName"] ?? "T_ROB1");
+    try {
+      await controller.resetProgramPointer(taskName);
+      return { content: [{ type: "text" as const, text: `\u2713 Program pointer reset (${taskName})` }], details: { taskName } };
+    } catch (err) { return errorResult(`reset_program_pointer failed: ${String(err)}`); }
+  }
+
   if (action === "set_joints") {
-    if (!controller?.isConnected()) {
-      return errorResult("Not connected. Use 'connect' action first.");
-    }
+    if (!controller?.isConnected()) return errorResult("Not connected. Use 'connect' first.");
     const rawJ = params["joints"];
     if (!Array.isArray(rawJ)) return errorResult("joints array is required");
     const nums = (rawJ as unknown[]).map(Number);
     if (nums.some(isNaN)) return errorResult("joints must all be numeric");
-
     try {
       const cfg = currentConfig || getCfg("abb-crb-15000");
       const { values, violations } = validateJointValues(cfg, nums);
       const speed = Number(params["speed"] ?? 100);
       await controller.moveToJoints(values, speed);
-
-      const lines = cfg.joints.map((j, i) => `  ${j.label ?? j.id}: ${values[i].toFixed(2)}°`);
-      let text = `✓ Moving to joint positions:\n${lines.join("\n")}`;
-      if (violations.length) {
-        text += `\n\n⚠ Clamped to limits:\n${violations.map(v => `  ${v}`).join("\n")}`;
-      }
+      const lines = cfg.joints.map((j, i) => `  ${j.label ?? j.id}: ${values[i]!.toFixed(2)}\u00b0`);
+      let text = `\u2713 Moving to joints:\n${lines.join("\n")}`;
+      if (violations.length) text += `\n\n\u26a0 Clamped:\n${violations.map(v => `  ${v}`).join("\n")}`;
       pushHistory(motionState, values, "set_joints");
       return { content: [{ type: "text" as const, text }], details: { joints: values, violations } };
-    } catch (err) {
-      return errorResult(`Move failed: ${String(err)}`);
-    }
+    } catch (err) { return errorResult(`set_joints failed: ${String(err)}`); }
   }
 
-  // MoveJ (continuous motion from start/current to target with speed)
   if (action === "movj") {
-    if (!controller?.isConnected()) {
-      return errorResult("Not connected. Use 'connect' action first.");
-    }
-
+    if (!controller?.isConnected()) return errorResult("Not connected. Use 'connect' first.");
     const rawTarget = params["joints"];
     if (!Array.isArray(rawTarget)) return errorResult("joints array is required");
     const targetNums = (rawTarget as unknown[]).map(Number);
     if (targetNums.some(isNaN)) return errorResult("joints must all be numeric");
-
-    const rawStart = params["start_joints"];
-    if (rawStart !== undefined && !Array.isArray(rawStart)) {
-      return errorResult("start_joints must be an array when provided");
-    }
-
     try {
       const cfg = currentConfig || getCfg("abb-crb-15000");
-      const targetValidation = validateJointValues(cfg, targetNums);
-      const target = targetValidation.values;
+      const { values: target, violations: tViol } = validateJointValues(cfg, targetNums);
       const speed = clamp(Number(params["speed"] ?? 45), 1, 100);
       const maxJointStep = clamp(Number(params["max_joint_step"] ?? 6), 0.25, 45);
       const minSamples = clamp(Number(params["min_samples"] ?? 2), 2, 50);
-      const interpolationRaw = String(params["interpolation"] ?? "cosine").toLowerCase();
+      const iRaw = String(params["interpolation"] ?? "cosine").toLowerCase();
       const interpolation: InterpolationMode =
-        interpolationRaw === "linear" || interpolationRaw === "smoothstep" || interpolationRaw === "cosine"
-          ? interpolationRaw
-          : "cosine";
+        iRaw === "linear" || iRaw === "smoothstep" || iRaw === "cosine" ? iRaw : "cosine";
       const moduleName = String(params["module_name"] ?? "MoveJSegment");
-
-      let startViolations: string[] = [];
-      let start: number[];
+      const rawStart = params["start_joints"];
+      let start: number[]; let sViol: string[] = [];
       if (Array.isArray(rawStart)) {
-        const startNums = (rawStart as unknown[]).map(Number);
-        if (startNums.some(isNaN)) return errorResult("start_joints must all be numeric");
-        const startValidation = validateJointValues(cfg, startNums);
-        start = startValidation.values;
-        startViolations = startValidation.violations;
+        const sNums = (rawStart as unknown[]).map(Number);
+        if (sNums.some(isNaN)) return errorResult("start_joints must all be numeric");
+        const sv = validateJointValues(cfg, sNums); start = sv.values; sViol = sv.violations;
       } else if (motionState.lastTarget && motionState.lastTarget.length === target.length) {
         start = [...motionState.lastTarget];
       } else {
         start = await controller.getJointPositions();
       }
-
-      const waypoints = interpolateJoints(start, target, maxJointStep, minSamples, interpolation);
-      const rapidPoints = waypoints.map((joints, idx) => ({
-        joints,
-        speed,
-        zone: idx === waypoints.length - 1 ? "fine" : "z10",
-      }));
-      const rapidCode = controller.generateRapidSequence(rapidPoints, moduleName);
+      const wps = interpolateJoints(start, target, maxJointStep, minSamples, interpolation);
+      const rapidCode = controller.generateRapidSequence(
+        wps.map((joints, idx) => ({ joints, speed, zone: idx === wps.length - 1 ? "fine" : "z10" })),
+        moduleName
+      );
       await controller.executeRapidProgram(rapidCode, moduleName);
-
       pushHistory(motionState, target, "movj");
-
-      const violations = [...startViolations, ...targetValidation.violations];
-      let text =
-        `✓ MoveJ executed\n` +
-        `  Speed: v${speed}\n` +
-        `  Waypoints: ${waypoints.length}\n` +
-        `  Interpolation: ${interpolation}\n` +
-        `  End joints: [${target.map(v => v.toFixed(2)).join(", ")}]`;
-      if (violations.length > 0) {
-        text += `\n\n⚠ Clamped to limits:\n${violations.map(v => `  ${v}`).join("\n")}`;
-      }
-
-      return {
-        content: [{ type: "text" as const, text }],
-        details: {
-          speed,
-          maxJointStep,
-          minSamples,
-          interpolation,
-          start,
-          end: target,
-          waypoints: waypoints.length,
-          moduleName,
-          violations,
-        },
-      };
-    } catch (err) {
-      return errorResult(`movj failed: ${String(err)}`);
-    }
+      const violations = [...sViol, ...tViol];
+      let text = `\u2713 MoveJ  speed:${speed}  wpts:${wps.length}  interp:${interpolation}\n  End:[${target.map(v => v.toFixed(2)).join(",")}]`;
+      if (violations.length) text += `\n\u26a0 Clamped:\n${violations.map(v => `  ${v}`).join("\n")}`;
+      return { content: [{ type: "text" as const, text }], details: { speed, waypoints: wps.length, start, end: target, moduleName, violations } };
+    } catch (err) { return errorResult(`movj failed: ${String(err)}`); }
   }
 
-  // Set preset
-  if (action === "set_preset") {
-    if (!controller?.isConnected()) {
-      return errorResult("Not connected. Use 'connect' action first.");
-    }
-    const presetName = String(params["preset"] ?? "").trim();
-    if (!presetName) return errorResult("preset name is required");
-
+  if (action === "movj_rapid") {
+    if (!controller?.isConnected()) return errorResult("Not connected. Use 'connect' first.");
+    const rawJ = params["joints"];
+    if (!Array.isArray(rawJ)) return errorResult("joints array is required");
+    const nums = (rawJ as unknown[]).map(Number);
+    if (nums.some(isNaN)) return errorResult("joints must all be numeric");
     try {
       const cfg = currentConfig || getCfg("abb-crb-15000");
-      const joints = resolvePreset(cfg, presetName);
-      const speed = Number(params["speed"] ?? 100);
-      await controller.moveToJoints(joints, speed);
-
-      const lines = cfg.joints.map((j, i) => `  ${j.label ?? j.id}: ${joints[i].toFixed(2)}°`);
-      pushHistory(motionState, joints, `preset:${presetName}`);
-      return {
-        content: [{ type: "text" as const, text: `✓ Applied preset "${presetName}":\n${lines.join("\n")}` }],
-        details: { preset: presetName, joints },
-      };
-    } catch (err) {
-      return errorResult(String(err));
-    }
+      const { values, violations } = validateJointValues(cfg, nums);
+      const speed = clamp(Number(params["speed"] ?? 20), 1, 100);
+      const zone = String(params["zone"] ?? "fine");
+      const rapidCode = controller.generateRapidMoveJoints(values, speed, zone);
+      await controller.executeRapidProgram(rapidCode, "MainModule", true);
+      pushHistory(motionState, values, "movj_rapid");
+      let text = `\u2713 movj_rapid  joints:[${values.map(v => v.toFixed(2)).join(",")}]  speed:${speedToRapidConst(speed)}  zone:${zone}`;
+      if (violations.length) text += `\n\u26a0 Clamped:\n${violations.map(v => `  ${v}`).join("\n")}`;
+      return { content: [{ type: "text" as const, text }], details: { joints: values, speed, zone, violations } };
+    } catch (err) { return errorResult(`movj_rapid failed: ${String(err)}`); }
   }
 
-  // Run sequence
-  if (action === "run_sequence") {
-    if (!controller?.isConnected()) {
-      return errorResult("Not connected. Use 'connect' action first.");
-    }
-    const seqName = String(params["sequence"] ?? "").trim();
-    if (!seqName) return errorResult("sequence name is required");
-
-    try {
-      const cfg = currentConfig || getCfg("abb-crb-15000");
-      const seq = resolveSequence(cfg, seqName);
-      const positions = seq.steps.map(step => ({
-        joints: step.joints,
-        speed: step.speed || 100,
-        zone: step.zone || "z10",
-      }));
-      const rapidCode = controller.generateRapidSequence(positions);
-      await controller.executeRapidProgram(rapidCode);
-      if (seq.steps.length > 0) {
-        pushHistory(motionState, seq.steps[seq.steps.length - 1]!.joints, `sequence:${seqName}`);
-      }
-
-      return {
-        content: [{ type: "text" as const, text: `✓ Executing sequence "${seqName}" (${seq.steps.length} steps)` }],
-        details: { sequence: seqName, steps: seq.steps.length },
-      };
-    } catch (err) {
-      return errorResult(String(err));
-    }
-  }
-
-  // Go home
   if (action === "go_home") {
-    if (!controller?.isConnected()) {
-      return errorResult("Not connected. Use 'connect' action first.");
-    }
+    if (!controller?.isConnected()) return errorResult("Not connected. Use 'connect' first.");
     try {
       const cfg = currentConfig || getCfg("abb-crb-15000");
       const homeJoints = cfg.joints.map(j => j.home);
       await controller.moveToJoints(homeJoints);
       pushHistory(motionState, homeJoints, "go_home");
-      return {
-        content: [{ type: "text" as const, text: "✓ Moving to home position" }],
-        details: { joints: homeJoints },
-      };
-    } catch (err) {
-      return errorResult(`Go home failed: ${String(err)}`);
-    }
+      return { content: [{ type: "text" as const, text: "\u2713 Moving to home position" }], details: { joints: homeJoints } };
+    } catch (err) { return errorResult(`go_home failed: ${String(err)}`); }
   }
 
-  // List robots
+  if (action === "set_preset") {
+    if (!controller?.isConnected()) return errorResult("Not connected. Use 'connect' first.");
+    const presetName = String(params["preset"] ?? "").trim();
+    if (!presetName) return errorResult("preset name is required");
+    try {
+      const cfg = currentConfig || getCfg("abb-crb-15000");
+      const joints = resolvePreset(cfg, presetName);
+      const speed = Number(params["speed"] ?? 100);
+      await controller.moveToJoints(joints, speed);
+      pushHistory(motionState, joints, `preset:${presetName}`);
+      const lines = cfg.joints.map((j, i) => `  ${j.label ?? j.id}: ${joints[i]!.toFixed(2)}\u00b0`);
+      return { content: [{ type: "text" as const, text: `\u2713 Preset "${presetName}":\n${lines.join("\n")}` }], details: { preset: presetName, joints } };
+    } catch (err) { return errorResult(String(err)); }
+  }
+
+  if (action === "run_sequence") {
+    if (!controller?.isConnected()) return errorResult("Not connected. Use 'connect' first.");
+    const seqName = String(params["sequence"] ?? "").trim();
+    if (!seqName) return errorResult("sequence name is required");
+    try {
+      const cfg = currentConfig || getCfg("abb-crb-15000");
+      const seq = resolveSequence(cfg, seqName);
+      const positions = seq.steps.map(s => ({ joints: s.joints, speed: s.speed ?? 100, zone: s.zone ?? "z10" }));
+      const rapidCode = controller.generateRapidSequence(positions);
+      await controller.executeRapidProgram(rapidCode);
+      if (seq.steps.length > 0) pushHistory(motionState, seq.steps[seq.steps.length - 1]!.joints, `seq:${seqName}`);
+      return { content: [{ type: "text" as const, text: `\u2713 Sequence "${seqName}" (${seq.steps.length} steps)` }], details: { sequence: seqName, steps: seq.steps.length } };
+    } catch (err) { return errorResult(String(err)); }
+  }
+
   if (action === "list_robots") {
     const robots = listRobots();
-    const lines = robots.map(r => {
-      try {
-        const cfg = getCfg(r);
-        return `  • ${r} — ${cfg.manufacturer} ${cfg.model} (${cfg.dof} DOF)`;
-      } catch {
-        return `  • ${r}`;
-      }
-    });
-    return {
-      content: [{ type: "text" as const, text: `Available robot configurations:\n${lines.join("\n")}` }],
-      details: { robots },
-    };
+    const lines = robots.map(r => { try { const c = getCfg(r); return `  \u2022 ${r} \u2014 ${c.manufacturer} ${c.model} (${c.dof} DOF)`; } catch { return `  \u2022 ${r}`; } });
+    return { content: [{ type: "text" as const, text: `Robots:\n${lines.join("\n")}` }], details: { robots } };
   }
 
-  // List presets
   if (action === "list_presets") {
     const robotId = String(params["robot_id"] ?? currentConfig?.id ?? "abb-crb-15000");
     try {
       const cfg = getCfg(robotId);
       const presets = Object.keys(cfg.presets ?? {});
-      return {
-        content: [{
-          type: "text" as const,
-          text: presets.length
-            ? `Presets for ${robotId}:\n${presets.map(p => `  • ${p}`).join("\n")}`
-            : "No presets defined"
-        }],
-        details: { robotId, presets },
-      };
-    } catch (err) {
-      return errorResult(String(err));
-    }
+      return { content: [{ type: "text" as const, text: presets.length ? `Presets for ${robotId}:\n${presets.map(p => `  \u2022 ${p}`).join("\n")}` : "No presets defined" }], details: { robotId, presets } };
+    } catch (err) { return errorResult(String(err)); }
   }
 
-  // List sequences
   if (action === "list_sequences") {
     const robotId = String(params["robot_id"] ?? currentConfig?.id ?? "abb-crb-15000");
     try {
       const cfg = getCfg(robotId);
-      const seqs = Object.entries(cfg.sequences ?? {}).map(
-        ([k, v]) => `  • ${k}${v.description ? ` — ${v.description}` : ""}`
-      );
-      return {
-        content: [{
-          type: "text" as const,
-          text: seqs.length
-            ? `Sequences for ${robotId}:\n${seqs.join("\n")}`
-            : "No sequences defined"
-        }],
-        details: { robotId, sequences: Object.keys(cfg.sequences ?? {}) },
-      };
-    } catch (err) {
-      return errorResult(String(err));
-    }
+      const seqs = Object.entries(cfg.sequences ?? {}).map(([k, v]) => `  \u2022 ${k}${v.description ? ` \u2014 ${v.description}` : ""}`);
+      return { content: [{ type: "text" as const, text: seqs.length ? `Sequences for ${robotId}:\n${seqs.join("\n")}` : "No sequences defined" }], details: { robotId, sequences: Object.keys(cfg.sequences ?? {}) } };
+    } catch (err) { return errorResult(String(err)); }
   }
 
-  // Execute RAPID
   if (action === "execute_rapid") {
-    if (!controller?.isConnected()) {
-      return errorResult("Not connected. Use 'connect' action first.");
-    }
+    if (!controller?.isConnected()) return errorResult("Not connected. Use 'connect' first.");
     const code = String(params["rapid_code"] ?? "");
     if (!code) return errorResult("rapid_code parameter is required");
     const moduleName = String(params["module_name"] ?? "MainModule");
-
+    const allowReal = params["allow_real_execution"] !== false;
     try {
-      await controller.executeRapidProgram(code, moduleName);
-      return {
-        content: [{ type: "text" as const, text: `✓ Executing RAPID program (${moduleName})` }],
-        details: { moduleName },
-      };
-    } catch (err) {
-      return errorResult(`RAPID execution failed: ${String(err)}`);
-    }
+      await controller.executeRapidProgram(code, moduleName, allowReal);
+      return { content: [{ type: "text" as const, text: `\u2713 RAPID executed (${moduleName})` }], details: { moduleName } };
+    } catch (err) { return errorResult(`execute_rapid failed: ${String(err)}`); }
   }
 
-  // Load RAPID (load without executing)
   if (action === "load_rapid") {
-    if (!controller?.isConnected()) {
-      return errorResult("Not connected. Use 'connect' action first.");
-    }
+    if (!controller?.isConnected()) return errorResult("Not connected. Use 'connect' first.");
     const code = String(params["rapid_code"] ?? "");
     if (!code) return errorResult("rapid_code parameter is required");
-    const moduleName = String(params["module_name"] ?? "MainModule");
-
+    const allowReal = Boolean(params["allow_real_execution"] ?? false);
     try {
-      await controller.loadRapidProgram(code, moduleName);
-      return {
-        content: [{ type: "text" as const, text: `✓ RAPID program loaded (${moduleName})` }],
-        details: { moduleName },
-      };
-    } catch (err) {
-      return errorResult(`RAPID load failed: ${String(err)}`);
-    }
+      await controller.loadRapidProgram(code, allowReal);
+      return { content: [{ type: "text" as const, text: "\u2713 RAPID program loaded" }], details: { loaded: true } };
+    } catch (err) { return errorResult(`load_rapid failed: ${String(err)}`); }
   }
 
-  // Start RAPID program
   if (action === "start_program") {
-    if (!controller?.isConnected()) {
-      return errorResult("Not connected. Use 'connect' action first.");
-    }
+    if (!controller?.isConnected()) return errorResult("Not connected. Use 'connect' first.");
+    const allowReal = Boolean(params["allow_real_execution"] ?? true);
     try {
-      await controller.startRapid();
-      return {
-        content: [{ type: "text" as const, text: "✓ RAPID program started" }],
-        details: { running: true },
-      };
-    } catch (err) {
-      return errorResult(`Start program failed: ${String(err)}`);
-    }
+      await controller.startRapid(allowReal);
+      return { content: [{ type: "text" as const, text: "\u2713 RAPID program started" }], details: { running: true } };
+    } catch (err) { return errorResult(`start_program failed: ${String(err)}`); }
   }
 
-  // Stop RAPID program
   if (action === "stop_program") {
-    if (!controller?.isConnected()) {
-      return errorResult("Not connected. Use 'connect' action first.");
-    }
+    if (!controller?.isConnected()) return errorResult("Not connected. Use 'connect' first.");
     try {
       await controller.stopRapid();
-      return {
-        content: [{ type: "text" as const, text: "✓ RAPID program stopped" }],
-        details: { running: false },
-      };
-    } catch (err) {
-      return errorResult(`Stop program failed: ${String(err)}`);
-    }
+      return { content: [{ type: "text" as const, text: "\u2713 RAPID program stopped" }], details: { running: false } };
+    } catch (err) { return errorResult(`stop_program failed: ${String(err)}`); }
   }
 
-  // Identify robot from controller data
-  if (action === "identify_robot") {
-    if (!controller?.isConnected()) {
-      return errorResult("Not connected. Use 'connect' action first.");
-    }
+  if (action === "motors_on" || action === "motors_off") {
+    if (!controller?.isConnected()) return errorResult("Not connected. Use 'connect' first.");
     try {
+      await controller.setMotors(action === "motors_on" ? "ON" : "OFF");
+      return { content: [{ type: "text" as const, text: `\u2713 Motors ${action === "motors_on" ? "ON" : "OFF"}` }], details: { motorState: action === "motors_on" ? "ON" : "OFF" } };
+    } catch (err) { return errorResult(`${action} failed: ${String(err)}`); }
+  }
+
+  if (action === "identify_robot") {
+    if (!controller?.isConnected()) return errorResult("Not connected. Use 'connect' first.");
+    try {
+      const { identifyRobot } = await import("./robot-config-loader.js");
       const liveJoints = await controller.getJointPositions();
       const cfg = currentConfig || getCfg("abb-crb-15000");
-      const jointConfigs = liveJoints.map((_, i) => {
-        const jCfg = cfg.joints[i];
-        return {
-          index: i,
-          id: jCfg?.id ?? `joint${i}`,
-          type: (jCfg?.type ?? "revolute") as "revolute" | "prismatic",
-          min: jCfg?.min ?? -180,
-          max: jCfg?.max ?? 180,
-          home: jCfg?.home ?? 0,
-        };
-      });
-      const { identifyRobot } = await import("./robot-config-loader.js");
-      const identified = identifyRobot(jointConfigs);
-      if (identified) {
-        const identifiedCfg = getCfg(identified);
-        return {
-          content: [{
-            type: "text" as const,
-            text: `✓ Robot identified: ${identifiedCfg.manufacturer} ${identifiedCfg.model} (${identified})`,
-          }],
-          details: { robotId: identified, manufacturer: identifiedCfg.manufacturer, model: identifiedCfg.model, dof: liveJoints.length },
-        };
+      const jointCfgs = liveJoints.map((_, i) => ({ index: i, id: `joint${i}`, type: "revolute" as const, min: cfg.joints[i]?.min ?? -180, max: cfg.joints[i]?.max ?? 180, home: cfg.joints[i]?.home ?? 0 }));
+      const id = identifyRobot(jointCfgs);
+      if (id) {
+        const ic = getCfg(id);
+        return { content: [{ type: "text" as const, text: `\u2713 Identified: ${ic.manufacturer} ${ic.model} (${id})` }], details: { robotId: id, manufacturer: ic.manufacturer, model: ic.model } };
       }
-      return {
-        content: [{ type: "text" as const, text: `⚠ Could not identify robot from controller data (${liveJoints.length} DOF). Specify robot_id manually.` }],
-        details: { identified: false, dof: liveJoints.length },
-      };
-    } catch (err) {
-      return errorResult(`Identify robot failed: ${String(err)}`);
-    }
-  }
-
-  // Motors on/off
-  if (action === "motors_on" || action === "motors_off") {
-    if (!controller?.isConnected()) {
-      return errorResult("Not connected. Use 'connect' action first.");
-    }
-    try {
-      const state = action === "motors_on" ? "ON" : "OFF";
-      await controller.setMotors(state);
-      return {
-        content: [{ type: "text" as const, text: `✓ Motors turned ${state.toLowerCase()}` }],
-        details: { motorState: state },
-      };
-    } catch (err) {
-      return errorResult(`Failed to set motors: ${String(err)}`);
-    }
+      return { content: [{ type: "text" as const, text: `\u26a0 Could not identify robot (${liveJoints.length} DOF). Specify robot_id manually.` }], details: { identified: false } };
+    } catch (err) { return errorResult(`identify_robot failed: ${String(err)}`); }
   }
 
   if (action === "get_motion_memory") {
-    return {
-      content: [{
-        type: "text" as const,
-        text:
-          `Motion memory:\n` +
-          `  Last target: ${motionState.lastTarget ? `[${motionState.lastTarget.map(v => v.toFixed(2)).join(", ")}]` : "(none)"}\n` +
-          `  History entries: ${motionState.history.length}`,
-      }],
-      details: {
-        lastTarget: motionState.lastTarget,
-        historyCount: motionState.history.length,
-        recent: motionState.history.slice(-10),
-      },
-    };
+    return { content: [{ type: "text" as const, text:
+      `Motion memory:\n  Last: ${motionState.lastTarget ? `[${motionState.lastTarget.map(v => v.toFixed(2)).join(",")}]` : "(none)"}\n  History: ${motionState.history.length} entries` }],
+      details: { lastTarget: motionState.lastTarget, historyCount: motionState.history.length, recent: motionState.history.slice(-10) } };
   }
 
   if (action === "reset_motion_memory") {
-    motionState.lastTarget = null;
-    motionState.history = [];
-    return {
-      content: [{ type: "text" as const, text: "✓ Motion memory reset" }],
-      details: { reset: true },
-    };
+    motionState.lastTarget = null; motionState.history = [];
+    return { content: [{ type: "text" as const, text: "\u2713 Motion memory reset" }], details: { reset: true } };
   }
 
   if (action === "dance_two_points") {
-    if (!controller?.isConnected()) {
-      return errorResult("Not connected. Use 'connect' action first.");
-    }
-
-    const rawA = params["point_a"];
-    const rawB = params["point_b"];
-    if (!Array.isArray(rawA) || !Array.isArray(rawB)) {
-      return errorResult("point_a and point_b arrays are required");
-    }
-
-    const pointANums = (rawA as unknown[]).map(Number);
-    const pointBNums = (rawB as unknown[]).map(Number);
-    if (pointANums.some(isNaN) || pointBNums.some(isNaN)) {
-      return errorResult("point_a and point_b must contain only numeric values");
-    }
-
+    if (!controller?.isConnected()) return errorResult("Not connected. Use 'connect' first.");
+    const rawA = params["point_a"]; const rawB = params["point_b"];
+    if (!Array.isArray(rawA) || !Array.isArray(rawB)) return errorResult("point_a and point_b arrays are required");
+    const pA = (rawA as unknown[]).map(Number); const pB = (rawB as unknown[]).map(Number);
+    if (pA.some(isNaN) || pB.some(isNaN)) return errorResult("point_a and point_b must be numeric");
     try {
       const cfg = currentConfig || getCfg("abb-crb-15000");
-      const pointAValidation = validateJointValues(cfg, pointANums);
-      const pointBValidation = validateJointValues(cfg, pointBNums);
-      const pointA = pointAValidation.values;
-      const pointB = pointBValidation.values;
-      const violations = [...pointAValidation.violations, ...pointBValidation.violations];
-
+      const { values: pointA, violations: vA } = validateJointValues(cfg, pA);
+      const { values: pointB, violations: vB } = validateJointValues(cfg, pB);
       const repeat = clamp(Number(params["repeat"] ?? 2), 1, 64);
       const speed = clamp(Number(params["speed"] ?? 45), 1, 100);
       const maxJointStep = clamp(Number(params["max_joint_step"] ?? 6), 0.25, 45);
       const minSamples = clamp(Number(params["min_samples"] ?? 2), 2, 50);
-      const interpolationRaw = String(params["interpolation"] ?? "cosine").toLowerCase();
-      const interpolation: InterpolationMode =
-        interpolationRaw === "linear" || interpolationRaw === "smoothstep" || interpolationRaw === "cosine"
-          ? interpolationRaw
-          : "cosine";
-      const autoConnect = params["auto_connect"] !== false;
-      const returnToA = params["return_to_a"] === true;
-      const moduleName = String(params["module_name"] ?? "DanceSegment");
+      const iRaw = String(params["interpolation"] ?? "cosine").toLowerCase();
+      const interpolation: InterpolationMode = iRaw === "linear" || iRaw === "smoothstep" || iRaw === "cosine" ? iRaw : "cosine";
       const result = await executeContinuousDance(controller, cfg, motionState, {
-        pointA,
-        pointB,
-        repeat,
-        speed,
-        maxJointStep,
-        minSamples,
-        interpolation,
-        autoConnect,
-        returnToA,
-        moduleName,
-        source: "dance_two_points",
+        pointA, pointB, repeat, speed, maxJointStep, minSamples, interpolation,
+        autoConnect: params["auto_connect"] !== false, returnToA: params["return_to_a"] === true,
+        moduleName: String(params["module_name"] ?? "DanceSegment"), source: "dance_two_points",
       });
-
-      let text =
-        `✓ Executing continuous dance segment\n` +
-        `  Repeat: ${result.repeat}\n` +
-        `  Waypoints: ${result.waypoints}\n` +
-        `  Speed: v${result.speed}\n` +
-        `  Interpolation: ${result.interpolation}\n` +
-        `  End joint: [${result.end.map(v => v.toFixed(2)).join(", ")}]`;
-      if (violations.length > 0) {
-        text += `\n\n⚠ Clamped to limits:\n${violations.map(v => `  ${v}`).join("\n")}`;
-      }
-
-      return {
-        content: [{ type: "text" as const, text }],
-        details: {
-          repeat,
-          speed,
-          maxJointStep,
-          minSamples,
-          interpolation,
-          waypoints: result.waypoints,
-          start: result.start,
-          end: result.end,
-          moduleName,
-          violations,
-        },
-      };
-    } catch (err) {
-      return errorResult(`dance_two_points failed: ${String(err)}`);
-    }
+      const violations = [...vA, ...vB];
+      let text = `\u2713 Dance  repeat:${result.repeat}  wpts:${result.waypoints}  speed:${result.speed}  interp:${result.interpolation}`;
+      if (violations.length) text += `\n\u26a0 Clamped:\n${violations.map(v => `  ${v}`).join("\n")}`;
+      return { content: [{ type: "text" as const, text }], details: { ...result, violations } };
+    } catch (err) { return errorResult(`dance_two_points failed: ${String(err)}`); }
   }
 
   if (action === "dance_template") {
-    if (!controller?.isConnected()) {
-      return errorResult("Not connected. Use 'connect' action first.");
-    }
+    if (!controller?.isConnected()) return errorResult("Not connected. Use 'connect' first.");
     try {
       const cfg = currentConfig || getCfg("abb-crb-15000");
       const template = String(params["template"] ?? "wave").toLowerCase();
@@ -780,61 +579,20 @@ export async function handleAction(
       const speed = clamp(Number(params["speed"] ?? 45), 1, 100);
       const maxJointStep = clamp(Number(params["max_joint_step"] ?? 6), 0.25, 45);
       const minSamples = clamp(Number(params["min_samples"] ?? 2), 2, 50);
-      const interpolationRaw = String(params["interpolation"] ?? "cosine").toLowerCase();
-      const interpolation: InterpolationMode =
-        interpolationRaw === "linear" || interpolationRaw === "smoothstep" || interpolationRaw === "cosine"
-          ? interpolationRaw
-          : "cosine";
-      const autoConnect = params["auto_connect"] !== false;
-      const returnToA = params["return_to_a"] === true;
-      const moduleName = String(params["module_name"] ?? `DanceTemplate_${template}`);
-
+      const iRaw = String(params["interpolation"] ?? "cosine").toLowerCase();
+      const interpolation: InterpolationMode = iRaw === "linear" || iRaw === "smoothstep" || iRaw === "cosine" ? iRaw : "cosine";
       const { pointA, pointB } = buildTemplatePoints(cfg, template, amplitude);
       const repeat = Math.max(1, Math.floor(beats / 2));
       const result = await executeContinuousDance(controller, cfg, motionState, {
-        pointA,
-        pointB,
-        repeat,
-        speed,
-        maxJointStep,
-        minSamples,
-        interpolation,
-        autoConnect,
-        returnToA,
-        moduleName,
-        source: `dance_template:${template}`,
+        pointA, pointB, repeat, speed, maxJointStep, minSamples, interpolation,
+        autoConnect: params["auto_connect"] !== false, returnToA: params["return_to_a"] === true,
+        moduleName: String(params["module_name"] ?? `DanceTemplate_${template}`), source: `dance_template:${template}`,
       });
-
-      return {
-        content: [{
-          type: "text" as const,
-          text:
-            `✓ Executing dance template '${template}'\n` +
-            `  Beats: ${beats}\n` +
-            `  Repeat: ${result.repeat}\n` +
-            `  Waypoints: ${result.waypoints}\n` +
-            `  Speed: v${result.speed}\n` +
-            `  Interpolation: ${result.interpolation}`,
-        }],
-        details: {
-          template,
-          amplitude,
-          beats,
-          repeat: result.repeat,
-          speed: result.speed,
-          maxJointStep: result.maxJointStep,
-          minSamples: result.minSamples,
-          interpolation: result.interpolation,
-          waypoints: result.waypoints,
-          start: result.start,
-          end: result.end,
-          moduleName: result.moduleName,
-        },
-      };
-    } catch (err) {
-      return errorResult(`dance_template failed: ${String(err)}`);
-    }
+      return { content: [{ type: "text" as const, text:
+        `\u2713 Dance template '${template}'  beats:${beats}  repeat:${result.repeat}  wpts:${result.waypoints}` }],
+        details: { template, amplitude, beats, ...result } };
+    } catch (err) { return errorResult(`dance_template failed: ${String(err)}`); }
   }
 
   return errorResult(`Unknown action: "${action}"`);
-}
+} 

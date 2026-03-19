@@ -1,8 +1,6 @@
 /**
  * abb-robot-tool.ts
- * OpenClaw MCP agent tool for controlling actual ABB robots
- * 
- * Provides natural language interface to ABB robot control via PC SDK
+ * OpenClaw MCP agent tool for controlling actual ABB robots via PC SDK.
  */
 
 import type { AnyAgentTool } from "openclaw/plugin-sdk";
@@ -14,7 +12,7 @@ import {
   type RobotConfig,
 } from "./robot-config-loader.js";
 
-const ABB_PLUGIN_VERSION = "1.0.2";
+const ABB_PLUGIN_VERSION = "1.1.0";
 
 // ── Global state ─────────────────────────────────────────────────────────────
 
@@ -49,10 +47,10 @@ export function createABBRobotTool(pluginConfig: Record<string, unknown>): AnyAg
     name: "abb_robot",
     label: "ABB Robot Control",
     description:
-      "Control actual ABB robots via PC SDK. Connect to robot controllers, " +
+      "Control ABB robots via PC SDK. Connect to controllers, scan network for controllers, " +
       "move robots to joint positions, execute RAPID programs, apply presets, " +
-      "run motion sequences, and query robot status. Supports automatic robot " +
-      "identification based on DH parameters and joint limits.",
+      "run motion sequences, query status and event logs, manage speed ratio, " +
+      "backup modules, and manage RAPID tasks.",
 
     parameters: {
       type: "object" as const,
@@ -61,37 +59,72 @@ export function createABBRobotTool(pluginConfig: Record<string, unknown>): AnyAg
         action: {
           type: "string",
           enum: [
-            "connect", "disconnect", "get_status", "get_joints", "set_joints",
-            "set_preset", "run_sequence", "go_home", "identify_robot",
-            "list_robots", "list_presets", "list_sequences", "execute_rapid",
-            "load_rapid", "start_program", "stop_program", "motors_on", "motors_off",
-            "get_version",
-            "movj",
-            "dance_two_points", "dance_template", "get_motion_memory", "reset_motion_memory",
+            // Connection
+            "connect", "disconnect", "scan_controllers",
+            // Status & info
+            "get_status", "get_system_info", "get_service_info", "get_version",
+            // Position
+            "get_joints", "set_joints", "get_world_position",
+            // Speed
+            "get_speed", "set_speed",
+            // Motion
+            "movj", "movj_rapid", "go_home",
+            // Presets & sequences
+            "set_preset", "run_sequence", "list_robots", "list_presets", "list_sequences",
+            // RAPID
+            "execute_rapid", "load_rapid", "start_program", "stop_program",
+            "reset_program_pointer",
+            // Tasks & modules
+            "list_tasks", "backup_module",
+            // Event log
+            "get_event_log",
+            // Motors
+            "motors_on", "motors_off",
+            // Robot identification
+            "identify_robot",
+            // Dance / creative motion
+            "dance_two_points", "dance_template",
+            // Motion memory
+            "get_motion_memory", "reset_motion_memory",
           ],
           description: "The action to perform.",
         },
+        // Connection
         host: { type: "string", description: "Controller IP address or hostname" },
         port: { type: "number", description: "Controller port (default: 7000)" },
         robot_id: { type: "string", description: "Robot configuration ID" },
-        joints: { type: "array", items: { type: "number" }, description: "Joint angles in degrees" },
+        // Motion
+        joints: { type: "array", items: { type: "number" }, description: "Joint angles in degrees [j1..j6]" },
         start_joints: { type: "array", items: { type: "number" }, description: "Optional MoveJ start joints in degrees" },
+        speed: { type: "number", description: "Speed: 1-100 for motion actions; 1-7000 for set_speed (mm/s TCP)" },
+        zone: { type: "string", description: "Motion zone: fine | z1 | z5 | z10 | z50 (default: fine)" },
+        // Presets & sequences
         preset: { type: "string", description: "Named preset key" },
         sequence: { type: "string", description: "Named sequence key" },
-        speed: { type: "number", description: "Movement speed percentage (1-100)" },
-        point_a: { type: "array", items: { type: "number" }, description: "Dance point A joint angles in degrees" },
-        point_b: { type: "array", items: { type: "number" }, description: "Dance point B joint angles in degrees" },
-        repeat: { type: "number", description: "How many A/B oscillations to execute (default: 2)" },
+        // RAPID
+        rapid_code: { type: "string", description: "RAPID program source code" },
+        module_name: { type: "string", description: "RAPID module name (default: MainModule)" },
+        allow_real_execution: { type: "boolean", description: "Permit execution on real (non-virtual) controllers" },
+        // movj_rapid
+        task_name: { type: "string", description: "RAPID task name (default: T_ROB1)" },
+        program_timeout_ms: { type: "number", description: "Max wait ms for RAPID completion (default: 60000)" },
+        // Event log
+        category_id: { type: "number", description: "Event log category (0=common, default: 0)" },
+        limit: { type: "number", description: "Max entries to return (default: 20)" },
+        // Backup
+        output_dir: { type: "string", description: "Local directory to write backup file" },
+        // Dance
+        point_a: { type: "array", items: { type: "number" }, description: "Dance point A joint angles" },
+        point_b: { type: "array", items: { type: "number" }, description: "Dance point B joint angles" },
+        repeat: { type: "number", description: "A/B oscillation count (default: 2)" },
         max_joint_step: { type: "number", description: "Max interpolation step per joint in degrees (default: 6)" },
-        min_samples: { type: "number", description: "Minimum interpolation samples per segment (default: 2)" },
-        interpolation: { type: "string", description: "Interpolation profile: linear | smoothstep | cosine" },
+        min_samples: { type: "number", description: "Min interpolation samples per segment (default: 2)" },
+        interpolation: { type: "string", description: "Interpolation: linear | smoothstep | cosine" },
         auto_connect: { type: "boolean", description: "Auto-connect from previous endpoint to point A (default: true)" },
-        return_to_a: { type: "boolean", description: "Return to point A at end of dance segment (default: false)" },
-        template: { type: "string", description: "Built-in dance template: wave | bounce | sway | twist" },
-        amplitude: { type: "number", description: "Template amplitude scale (0.1-2.0, default: 1.0)" },
+        return_to_a: { type: "boolean", description: "Return to point A after dance segment (default: false)" },
+        template: { type: "string", description: "Dance template: wave | bounce | sway | twist" },
+        amplitude: { type: "number", description: "Template amplitude scale 0.1-2.0 (default: 1.0)" },
         beats: { type: "number", description: "Template beats mapped to repeat count (default: 8)" },
-        module_name: { type: "string", description: "RAPID module name for generated dance segment" },
-        rapid_code: { type: "string", description: "RAPID program code" },
       },
       required: ["action"],
     },
@@ -99,14 +132,39 @@ export function createABBRobotTool(pluginConfig: Record<string, unknown>): AnyAg
     execute: async (_id: string, params: Record<string, unknown>) => {
       const action = String(params["action"] ?? "");
 
+      // ── Version ────────────────────────────────────────────────────────────
       if (action === "get_version") {
         return {
-          content: [{ type: "text" as const, text: `abb_robot plugin version: ${ABB_PLUGIN_VERSION}` }],
+          content: [{ type: "text" as const, text: `abb_robot plugin v${ABB_PLUGIN_VERSION}` }],
           details: { plugin: "abb-robot-control", version: ABB_PLUGIN_VERSION },
         };
       }
 
-      // Connect action
+      // ── Scan controllers (no connection required) ───────────────────────────
+      if (action === "scan_controllers") {
+        try {
+          // Use a temporary controller instance just for scanning
+          const tempCtrl = createController({ host: "" });
+          const result = await tempCtrl.scanControllers();
+          if (!result.success) return errorResult(String((result as any).error ?? "Scan failed"));
+          const lines = result.controllers.map(
+            (c) => `  • ${c.ip} — ${c.systemName} (${c.isVirtual ? "virtual" : "real"}) id=${c.id}`
+          );
+          return {
+            content: [{
+              type: "text" as const,
+              text: result.total === 0
+                ? "No ABB controllers found on the network."
+                : `Found ${result.total} controller(s):\n${lines.join("\n")}`,
+            }],
+            details: result,
+          };
+        } catch (err) {
+          return errorResult(`scan_controllers failed: ${String(err)}`);
+        }
+      }
+
+      // ── Connect ────────────────────────────────────────────────────────────
       if (action === "connect") {
         const host = String(params["host"] ?? pluginConfig["controllerHost"] ?? "");
         if (!host) return errorResult("host parameter or controllerHost config is required");
@@ -147,9 +205,10 @@ export function createABBRobotTool(pluginConfig: Record<string, unknown>): AnyAg
           return {
             content: [{
               type: "text" as const,
-              text: `✓ Connected to ABB controller at ${host}:${port}\n` +
-                    `System: ${systemName}\n` +
-                    `Robot: ${currentConfig.manufacturer} ${currentConfig.model} (${currentConfig.id})`
+              text:
+                `✓ Connected to ABB controller at ${host}:${port}\n` +
+                `System: ${systemName}\n` +
+                `Robot: ${currentConfig.manufacturer} ${currentConfig.model} (${currentConfig.id})`,
             }],
             details: { connected: true, host, port, systemName, robotId: currentConfig.id },
           };
@@ -158,6 +217,7 @@ export function createABBRobotTool(pluginConfig: Record<string, unknown>): AnyAg
         }
       }
 
+      // ── All remaining actions routed through handleAction ──────────────────
       return handleAction(
         action,
         params,

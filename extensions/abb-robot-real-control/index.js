@@ -507,6 +507,63 @@ async function handleAction(action, params, config) {
         verification: verify,
       });
     }
+    case "movj_rapid": {
+      // 方案B: load_rapid → start_program → wait (默认推荐方案)
+      const joints = Array.isArray(params.joints) ? params.joints.map((x) => Number(x) || 0).slice(0, 6) : null;
+      if (!joints || joints.length !== 6) return result("movj_rapid requires exactly 6 joint values.", { success: false });
+      const speed = Math.max(1, Math.min(100, Number(params.speed || 20)));
+      const zone = String(params.zone || "fine");
+      const taskName = String(params.taskName || "T_ROB1");
+      const moduleName = String(params.moduleName || "OpenClawMove");
+      const waitMs = Math.max(3000, Math.min(300000, Number(params.programTimeoutMs || 60000)));
+
+      // 生成标准RAPID程序
+      const j = joints;
+      const speedVal = Math.max(1, Math.min(7000, speed * 10));
+      const rapidCode = [
+        `MODULE ${moduleName}`,
+        `  PROC main()`,
+        `    MoveAbsJ [[${j[0]},${j[1]},${j[2]},${j[3]},${j[4]},${j[5]}],[9E+09,9E+09,9E+09,9E+09,9E+09,9E+09]], [${speedVal},500,5000,1000], ${zone}, tool0;`,
+        `  ENDPROC`,
+        `ENDMODULE`,
+      ].join("\n");
+
+      // 读取运动前关节角
+      const before = await invokeBridge("GetJointPositions", {}, state.host, state.port, bridgeDllPath);
+
+      // 加载程序
+      const loadR = await invokeBridge("LoadRapidProgram", { code: rapidCode, moduleName, taskName }, state.host, state.port, bridgeDllPath);
+      if (!loadR.success) {
+        return result(`movj_rapid load failed: ${loadR.error || "unknown"}`, { success: false, result: loadR, rapidCode });
+      }
+
+      // 复位程序指针
+      await invokeBridge("ResetProgramPointer", { taskName }, state.host, state.port, bridgeDllPath);
+
+      // 启动程序
+      const startR = await invokeBridge("StartRapid", { allowRealExecution: true }, state.host, state.port, bridgeDllPath);
+      if (!startR.success) {
+        const diag = await fetchStatusAndLogs(state.host, state.port, bridgeDllPath);
+        return result(`movj_rapid start failed: ${startR.error || "unknown"}`, { success: false, result: startR, rapidCode, ...diag });
+      }
+
+      // 等待程序执行完成
+      const idle = await waitRapidIdle(state.host, state.port, bridgeDllPath, waitMs, 400);
+      const after = await invokeBridge("GetJointPositions", {}, state.host, state.port, bridgeDllPath);
+
+      if (!idle.success) {
+        return result(`movj_rapid: program did not finish within timeout (${waitMs}ms).`, {
+          success: false, before, after, startResult: startR, waitResult: idle, rapidCode,
+        });
+      }
+
+      return result("movj_rapid executed and completed.", {
+        success: true, before, after,
+        finalJoints: Array.isArray(after?.joints) ? after.joints : null,
+        rapidCode, loadResult: loadR, startResult: startR, waitResult: idle,
+      });
+    }
+
     case "execute_rapid": {
       const code = String(params.code || params.rapid_code || "");
       const moduleName = String(params.moduleName || params.module_name || "MainModule");

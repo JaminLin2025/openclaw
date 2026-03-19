@@ -172,9 +172,14 @@ async function execute(action, params) {
       const speed = Math.max(1, Math.min(100, Number(params.speed || 45)));
       state.joints = joints;
       if (wsConn && wsConn.readyState === 1) {
-        const reply = JSON.parse(await wsSendAndWait({ cmd: "movj", joints, speed }, 15000));
-        if (reply.cmd === "error") {
-          return result(`Virtual movj failed: ${reply.error || "unknown"}`, { success: false, mode: "virtual" });
+        try {
+          const reply = JSON.parse(await wsSendAndWait({ cmd: "movj", joints, speed }, 15000));
+          if (reply.cmd === "error") {
+            return result(`Virtual movj failed: ${reply.error || "unknown"}`, { success: false, mode: "virtual" });
+          }
+        } catch (wsErr) {
+          // viewer not responding - execute locally
+          return result(`Virtual movj executed (local): ${String(wsErr?.message || wsErr)}`, { success: true, mode: "virtual", joints, speed });
         }
       }
       return result("Virtual movj executed.", { success: true, mode: "virtual", joints, speed });

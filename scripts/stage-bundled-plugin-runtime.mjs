@@ -13,7 +13,17 @@ function relativeSymlinkTarget(sourcePath, targetPath) {
 }
 
 function symlinkPath(sourcePath, targetPath, type) {
-  fs.symlinkSync(relativeSymlinkTarget(sourcePath, targetPath), targetPath, type);
+  try {
+    fs.symlinkSync(relativeSymlinkTarget(sourcePath, targetPath), targetPath, type);
+  } catch (err) {
+    if (err.code === 'EPERM' || err.code === 'EACCES') {
+      // Windows: symlink requires elevated privileges or Developer Mode.
+      // Fall back to a plain file copy so the build succeeds without special permissions.
+      fs.copyFileSync(sourcePath, targetPath);
+    } else {
+      throw err;
+    }
+  }
 }
 
 function shouldWrapRuntimeJsFile(sourcePath) {

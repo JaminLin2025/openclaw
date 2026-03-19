@@ -1,203 +1,196 @@
 /**
  * abb-csharp-bridge.ts
  * C# Bridge for ABB Robot Control via PC SDK
- * Uses edge-js to call C# code that communicates with actual ABB robot controllers
+ * Uses edge-js to call C# methods in ABBBridge.dll that communicate with real ABB controllers.
+ * Exposes ALL public methods defined in ABBBridge.cs.
  */
 
 import * as edge from "edge-js";
 import { EventEmitter } from "node:events";
 import path from "node:path";
 
+// Result shape returned by most bridge methods
+export interface BridgeResult {
+  success: boolean;
+  error?: string;
+  [key: string]: unknown;
+}
+
 /**
- * ABB C# Bridge - Communicates with actual ABB robots via PC SDK
+ * ABB C# Bridge — thin wrapper around ABBBridge.dll via edge-js.
+ * One instance per controller session; call connect() before any other method.
  */
 export class ABBCSharpBridge extends EventEmitter {
-  private connected: boolean = false;
-  private systemName: string = "";
-  private executeConnect: any;
-  private executeDisconnect: any;
-  private executeGetStatus: any;
-  private executeGetJointPositions: any;
-  private executeMoveToJoints: any;
-  private executeExecuteRapid: any;
-  private executeSetMotors: any;
+  private _connected: boolean = false;
+  private _systemName: string = "";
+
+  // edge-js function handles (initialised lazily)
+  private fn: Record<string, any> = {};
 
   constructor() {
     super();
-    this.initializeBridge();
+    this._initBridge();
   }
 
-  /**
-   * Initialize C# bridge functions
-   */
-  private initializeBridge() {
-    try {
-      const dllPath = path.join(__dirname, "ABBBridge.dll");
-      
-      this.executeConnect = edge.func({
-        assemblyFile: dllPath,
-        typeName: "ABBBridge",
-        methodName: "Connect"
-      });
-      
-      this.executeDisconnect = edge.func({
-        assemblyFile: dllPath,
-        typeName: "ABBBridge",
-        methodName: "Disconnect"
-      });
-      
-      this.executeGetStatus = edge.func({
-        assemblyFile: dllPath,
-        typeName: "ABBBridge",
-        methodName: "GetStatus"
-      });
-      
-      this.executeGetJointPositions = edge.func({
-        assemblyFile: dllPath,
-        typeName: "ABBBridge",
-        methodName: "GetJointPositions"
-      });
-      
-      this.executeMoveToJoints = edge.func({
-        assemblyFile: dllPath,
-        typeName: "ABBBridge",
-        methodName: "MoveToJoints"
-      });
-      
-      this.executeExecuteRapid = edge.func({
-        assemblyFile: dllPath,
-        typeName: "ABBBridge",
-        methodName: "ExecuteRapidProgram"
-      });
-      
-      this.executeSetMotors = edge.func({
-        assemblyFile: dllPath,
-        typeName: "ABBBridge",
-        methodName: "SetMotors"
-      });
-    } catch (err) {
-      console.warn("Warning: C# Bridge DLL not found. Using mock implementation.");
-    }
-  }
+  // ── Init ───────────────────────────────────────────────────────────────────
 
-  /**
-   * Connect to ABB controller
-   */
-  async connect(host: string, port: number = 7000): Promise<any> {
-    try {
-      if (this.executeConnect) {
-        const result = await this.executeConnect({ host, port });
-        if (result.success) {
-          this.connected = true;
-          this.systemName = result.systemName;
-          this.emit("connected", result);
-        }
-        return result;
-      } else {
-        throw new Error("C# Bridge not initialized");
+  private _initBridge(): void {
+    const dllPath = path.join(__dirname, "ABBBridge.dll");
+    const methods = [
+      "Connect",
+      "Disconnect",
+      "ScanControllers",
+      "GetStatus",
+      "GetSystemInfo",
+      "GetServiceInfo",
+      "GetSpeedRatio",
+      "SetSpeedRatio",
+      "GetJointPositions",
+      "GetWorldPosition",
+      "GetEventLogEntries",
+      "ListTasks",
+      "BackupModule",
+      "LoadRapidProgram",
+      "StartRapid",
+      "StopRapid",
+      "ResetProgramPointer",
+      "MoveToJoints",
+    ];
+
+    for (const methodName of methods) {
+      try {
+        this.fn[methodName] = edge.func({
+          assemblyFile: dllPath,
+          typeName: "ABBBridge",
+          methodName,
+        });
+      } catch {
+        // DLL not present at init time — errors surface at call time
       }
-    } catch (error) {
-      return { success: false, error: String(error) };
     }
   }
 
-  /**
-   * Disconnect from controller
-   */
-  async disconnect(): Promise<any> {
-    try {
-      if (this.executeDisconnect) {
-        const result = await this.executeDisconnect({});
-        if (result.success) {
-          this.connected = false;
-          this.emit("disconnected");
-        }
-        return result;
-      }
-    } catch (error) {
-      return { success: false, error: String(error) };
-    }
+  private async _call<T = BridgeResult>(methodName: string, payload: unknown): Promise<T> {
+    const fn = this.fn[methodName];
+    if (!fn) throw new Error(`C# bridge method '${methodName}' not initialised — is ABBBridge.dll present?`);
+    return fn(payload, true) as Promise<T>;
   }
 
-  /**
-   * Get controller status
-   */
-  async getStatus(): Promise<any> {
-    try {
-      if (this.executeGetStatus) {
-        return await this.executeGetStatus({});
-      }
-    } catch (error) {
-      return { success: false, error: String(error) };
+  // ── Connection ─────────────────────────────────────────────────────────────
+
+  async connect(host: string): Promise<BridgeResult> {
+    const result = await this._call<BridgeResult>("Connect", { host });
+    if (result.success) {
+      this._connected = true;
+      this._systemName = String(result.systemName ?? "");
+      this.emit("connected", result);
     }
+    return result;
   }
 
-  /**
-   * Get current joint positions
-   */
+  async disconnect(): Promise<BridgeResult> {
+    const result = await this._call<BridgeResult>("Disconnect", {});
+    if (result.success) {
+      this._connected = false;
+      this.emit("disconnected");
+    }
+    return result;
+  }
+
+  // ── Discovery ──────────────────────────────────────────────────────────────
+
+  async scanControllers(): Promise<BridgeResult> {
+    return this._call("ScanControllers", {});
+  }
+
+  // ── Status & Info ──────────────────────────────────────────────────────────
+
+  async getStatus(): Promise<BridgeResult> {
+    return this._call("GetStatus", {});
+  }
+
+  async getSystemInfo(): Promise<BridgeResult> {
+    return this._call("GetSystemInfo", {});
+  }
+
+  async getServiceInfo(): Promise<BridgeResult> {
+    return this._call("GetServiceInfo", {});
+  }
+
+  // ── Speed ──────────────────────────────────────────────────────────────────
+
+  async getSpeedRatio(): Promise<BridgeResult> {
+    return this._call("GetSpeedRatio", {});
+  }
+
+  async setSpeedRatio(speed: number): Promise<BridgeResult> {
+    return this._call("SetSpeedRatio", { speed });
+  }
+
+  // ── Position ───────────────────────────────────────────────────────────────
+
   async getJointPositions(): Promise<number[]> {
-    try {
-      if (this.executeGetJointPositions) {
-        const result = await this.executeGetJointPositions({});
-        return result.joints || [];
-      }
-    } catch (error) {
-      console.error("Error getting joint positions:", error);
-      return [];
-    }
+    const result = await this._call<BridgeResult>("GetJointPositions", {});
+    if (!result.success) throw new Error(String(result.error ?? "GetJointPositions failed"));
+    return result.joints as number[];
   }
 
-  /**
-   * Move to joint positions
-   */
-  async moveToJoints(joints: number[], speed: number = 100, zone: string = "fine"): Promise<any> {
-    try {
-      if (this.executeMoveToJoints) {
-        return await this.executeMoveToJoints({ joints, speed, zone });
-      }
-    } catch (error) {
-      return { success: false, error: String(error) };
-    }
+  async getWorldPosition(): Promise<BridgeResult> {
+    return this._call("GetWorldPosition", {});
   }
 
-  /**
-   * Execute RAPID program
-   */
-  async executeRapidProgram(code: string, moduleName: string = "MainModule"): Promise<any> {
-    try {
-      if (this.executeExecuteRapid) {
-        return await this.executeExecuteRapid({ code, moduleName });
-      }
-    } catch (error) {
-      return { success: false, error: String(error) };
-    }
+  // ── Event Log ──────────────────────────────────────────────────────────────
+
+  async getEventLogEntries(categoryId: number = 0, limit: number = 20): Promise<BridgeResult> {
+    return this._call("GetEventLogEntries", { categoryId, limit });
   }
 
-  /**
-   * Set motors on/off
-   */
-  async setMotors(state: "ON" | "OFF"): Promise<any> {
-    try {
-      if (this.executeSetMotors) {
-        return await this.executeSetMotors({ state });
-      }
-    } catch (error) {
-      return { success: false, error: String(error) };
-    }
+  // ── Tasks & Modules ────────────────────────────────────────────────────────
+
+  async listTasks(): Promise<BridgeResult> {
+    return this._call("ListTasks", {});
   }
 
-  /**
-   * Check if connected
-   */
+  async backupModule(moduleName: string, taskName: string, outputDir: string): Promise<BridgeResult> {
+    return this._call("BackupModule", { moduleName, taskName, outputDir });
+  }
+
+  async resetProgramPointer(taskName: string = "T_ROB1"): Promise<BridgeResult> {
+    return this._call("ResetProgramPointer", { taskName });
+  }
+
+  // ── RAPID ──────────────────────────────────────────────────────────────────
+
+  async loadRapidProgram(code: string, allowRealExecution: boolean = false): Promise<BridgeResult> {
+    return this._call("LoadRapidProgram", { code, allowRealExecution });
+  }
+
+  async startRapid(allowRealExecution: boolean = true): Promise<BridgeResult> {
+    return this._call("StartRapid", { allowRealExecution });
+  }
+
+  async stopRapid(): Promise<BridgeResult> {
+    return this._call("StopRapid", {});
+  }
+
+  // ── Motion ─────────────────────────────────────────────────────────────────
+
+  async moveToJoints(
+    joints: number[],
+    speed: number = 100,
+    zone: string = "fine"
+  ): Promise<BridgeResult> {
+    return this._call("MoveToJoints", { joints, speed, zone });
+  }
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+
   isConnected(): boolean {
-    return this.connected;
+    return this._connected;
   }
 
-  /**
-   * Get system name
-   */
   getSystemName(): string {
-    return this.systemName;
+    return this._systemName;
   }
 }
 
